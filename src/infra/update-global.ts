@@ -28,7 +28,9 @@ export type ResolvedGlobalInstallTarget = ResolvedGlobalInstallCommand & {
 const PRIMARY_PACKAGE_NAME = "openclaw";
 const ALL_PACKAGE_NAMES = [PRIMARY_PACKAGE_NAME] as const;
 const GLOBAL_RENAME_PREFIX = ".";
-export const OPENCLAW_MAIN_PACKAGE_SPEC = "github:openclaw/openclaw#main";
+export const OPENCLAW_MAIN_PACKAGE_SPEC = "github:Allonsygmbh/openclaw#main";
+export const CLAWY_FORK_TARBALL_URL =
+  "https://github.com/Allonsygmbh/openclaw/releases/latest/download/openclaw.tgz";
 const COREPACK_ENABLE_DOWNLOAD_PROMPT_DEFAULT = "0";
 const NPM_GLOBAL_INSTALL_QUIET_FLAGS = ["--no-fund", "--no-audit", "--loglevel=error"] as const;
 const NPM_GLOBAL_INSTALL_OMIT_OPTIONAL_FLAGS = [
@@ -166,7 +168,10 @@ export function resolveGlobalInstallSpec(params: {
   if (isExplicitPackageInstallSpec(target)) {
     return target;
   }
-  return `${params.packageName}@${target}`;
+  // Fork maintained by Allonsygmbh: `openclaw update` installs from our
+  // release tarball by default so users stay on the Clawy-managed build.
+  // Override with OPENCLAW_UPDATE_PACKAGE_SPEC or --tag <explicit-spec>.
+  return CLAWY_FORK_TARBALL_URL;
 }
 
 export async function createGlobalInstallEnv(
