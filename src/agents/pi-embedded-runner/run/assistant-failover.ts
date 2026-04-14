@@ -89,7 +89,7 @@ function resolveFailoverStatusOrTimeout(
 }
 
 function resolveSurfaceReason(
-  decisionReason: FailoverReason | undefined,
+  decisionReason: FailoverReason | null | undefined,
   timedOut: boolean,
 ): FailoverReason {
   if (decisionReason) {
