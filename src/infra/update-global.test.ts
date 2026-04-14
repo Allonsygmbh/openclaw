@@ -18,6 +18,7 @@ import {
   createGlobalInstallEnv,
   globalInstallArgs,
   globalInstallFallbackArgs,
+  CLAWY_FORK_TARBALL_URL,
   isExplicitPackageInstallSpec,
   isMainPackageTarget,
   OPENCLAW_MAIN_PACKAGE_SPEC,
@@ -115,6 +116,15 @@ describe("update global helpers", () => {
     );
     await expect(resolveGlobalPackageRoot("npm", runCommand, 1000)).resolves.toBe(
       path.join("/tmp/npm-root", "openclaw"),
+    );
+  });
+
+  it("defaults to the Clawy fork release tarball when no spec/override is set", () => {
+    expect(resolveGlobalInstallSpec({ packageName: "openclaw", tag: "latest" })).toBe(
+      CLAWY_FORK_TARBALL_URL,
+    );
+    expect(resolveGlobalInstallSpec({ packageName: "openclaw", tag: "beta" })).toBe(
+      CLAWY_FORK_TARBALL_URL,
     );
   });
 
