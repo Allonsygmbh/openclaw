@@ -62,24 +62,39 @@ jobs:
           EOF
           cat dist/clawy-release.json
 
-      - name: Bundle all runtime dependencies
+      - name: Install bundled plugin runtime deps
+        # scripts/postinstall-bundled-plugins.mjs discovers each bundled
+        # plugin's declared runtime deps (from dist/extensions/*/package.json)
+        # and installs the missing ones into <root>/node_modules/ via npm.
+        # Normally this runs at `npm install -g` time on the target VM,
+        # but on 2 GB VMs that's a 4-minute npm install for ~36 plugin
+        # deps. Run it once here in CI — node_modules ends up with all
+        # the plugin deps, and the next step bundles them into the tarball.
+        run: node scripts/postinstall-bundled-plugins.mjs
+
+      - name: Bundle all runtime dependencies (main + plugin deps)
         # `npm install -g <tarball>` on low-memory VMs (2 GB Hetzner base)
         # gets OOM-killed because npm resolves + fetches all 70+ deps at
         # install time, peaking at ~1.6 GB RSS. Pre-populate
-        # bundleDependencies with every key from `dependencies` so every
-        # runtime dep ships inside the tarball; install-time becomes a
-        # pure extract + bin-link with near-zero memory pressure.
-        # Run AFTER the marker step and BEFORE pack so pnpm pack picks
-        # up the mutated field. The edit is CI-only, not committed.
+        # bundleDependencies with every key from `dependencies` + every
+        # plugin-declared dep so every runtime dep ships inside the
+        # tarball; install-time becomes a pure extract + bin-link with
+        # near-zero memory pressure AND no postinstall npm install.
+        # Run AFTER postinstall-bundled-plugins (so node_modules has the
+        # plugin deps) and BEFORE pack so pnpm pack picks up the mutated
+        # field. The edit is CI-only, not committed.
         run: |
-          node -e "
-            const fs = require('fs');
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const { discoverBundledPluginRuntimeDeps } =
+              await import('./scripts/postinstall-bundled-plugins.mjs');
             const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            p.bundleDependencies = Object.keys(p.dependencies || {}).sort();
+            const main = Object.keys(p.dependencies || {});
+            const plugin = discoverBundledPluginRuntimeDeps().map(d => d.name);
+            p.bundleDependencies = [...new Set([...main, ...plugin])].sort();
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+            console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
           "
-          echo "bundleDependencies count:"
-          node -p "require('./package.json').bundleDependencies.length"
 
       - name: Pack tarball (prepack verifies prepared dist/)
         env:
