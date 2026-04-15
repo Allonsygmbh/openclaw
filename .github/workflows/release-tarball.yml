@@ -62,6 +62,25 @@ jobs:
           EOF
           cat dist/clawy-release.json
 
+      - name: Bundle all runtime dependencies
+        # `npm install -g <tarball>` on low-memory VMs (2 GB Hetzner base)
+        # gets OOM-killed because npm resolves + fetches all 70+ deps at
+        # install time, peaking at ~1.6 GB RSS. Pre-populate
+        # bundleDependencies with every key from `dependencies` so every
+        # runtime dep ships inside the tarball; install-time becomes a
+        # pure extract + bin-link with near-zero memory pressure.
+        # Run AFTER the marker step and BEFORE pack so pnpm pack picks
+        # up the mutated field. The edit is CI-only, not committed.
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.bundleDependencies = Object.keys(p.dependencies || {}).sort();
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+          echo "bundleDependencies count:"
+          node -p "require('./package.json').bundleDependencies.length"
+
       - name: Pack tarball (prepack verifies prepared dist/)
         env:
           # Tells the prepack hook to skip rebuilding and just verify
