@@ -1608,6 +1608,9 @@
     "ui:i18n:sync": "node --import tsx scripts/control-ui-i18n.ts sync --write",
     "ui:install": "node scripts/ui.js install"
   },
+  "bundleDependencies": [
+    "jiti"
+  ],
   "dependencies": {
     "@agentclientprotocol/sdk": "0.21.0",
     "@clack/prompts": "^1.2.0",
