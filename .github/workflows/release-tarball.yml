@@ -38,7 +38,36 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Pack tarball (prepack runs pnpm build + ui:build)
+      - name: Build dist + UI
+        run: |
+          pnpm build
+          pnpm ui:build
+
+      - name: Write Clawy release marker
+        # Drops a small JSON marker into dist/ identifying the fork tag.
+        # The CLI on each VM reads this at metrics-push time, so the
+        # admin UI can show "this VM is on clawy-2026.4.12-beta.1-1"
+        # rather than just "fork build". Upstream tarballs don't have
+        # this file, so its absence also signals upstream cleanly.
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          COMMIT="$(git rev-parse HEAD)"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > dist/clawy-release.json <<EOF
+          {
+            "tag": "${TAG}",
+            "commit": "${COMMIT}",
+            "built_at": "${BUILT_AT}"
+          }
+          EOF
+          cat dist/clawy-release.json
+
+      - name: Pack tarball (prepack verifies prepared dist/)
+        env:
+          # Tells the prepack hook to skip rebuilding and just verify
+          # that the dist/ we produced above is intact. Required so the
+          # marker we just wrote isn't blown away by a fresh build.
+          OPENCLAW_PREPACK_PREPARED: "1"
         run: |
           pnpm pack
           mv openclaw-*.tgz openclaw.tgz
