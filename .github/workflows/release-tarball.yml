@@ -16,7 +16,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Pack step can take 15+ minutes when bundleDependencies covers
+    # 70+ packages and the upstream codebase has grown. Default 30 min
+    # timeout was too tight for 4.27. Bumped to 60 min with margin.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
