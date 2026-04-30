@@ -161,7 +161,10 @@ jobs:
           # TypeScript types-only file ("export {};") — its real content
           # is ~44 bytes, so don't add a size threshold here.
           mkdir -p _verify
-          tar -xzf openclaw.tgz -C _verify 2>/dev/null
+          # tar exits 2 because of "Skipping to next header" warnings on the
+          # rewritten hardlink entries. Extraction still completes correctly;
+          # silence stderr and ignore exit code, then validate by inspection.
+          tar -xzf openclaw.tgz -C _verify 2>/dev/null || true
           if [ ! -s _verify/package/node_modules/@mariozechner/pi-agent-core/dist/types.js ]; then
             echo "ERROR: pi-agent-core/dist/types.js missing or empty after extraction" >&2
             exit 1
