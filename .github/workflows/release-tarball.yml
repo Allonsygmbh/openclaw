@@ -101,7 +101,7 @@ jobs:
             console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
           "
 
-      - name: Pack tarball (npm pack — pnpm hangs on bundleDependencies)
+      - name: Pack tarball (npm pack + dereference hardlinks)
         env:
           # Tells the prepack hook to skip rebuilding and just verify
           # that the dist/ we produced above is intact. Required so the
@@ -116,10 +116,27 @@ jobs:
         # pnpm lockfile and never returned. npm pack honors
         # bundleDependencies directly from package.json without any
         # lockfile dance and produces the same wire format.
+        #
+        # IMPORTANT: npm pack writes HARDLINKS for content-deduplicated
+        # files (e.g. @mariozechner/pi-agent-core/dist/types.js → hardlinks
+        # to @mariozechner/pi-ai/dist/types.js). The VM-side install does
+        # `tar -xzf openclaw.tgz --strip-components=1` which silently fails
+        # to resolve those hardlinks → missing files at runtime → gateway
+        # crashes with ERR_MODULE_NOT_FOUND. Re-pack after extraction to
+        # convert hardlinks into regular file copies, sidestepping the
+        # whole class of problem.
         run: |
           npm pack --silent --pack-destination .
-          mv openclaw-*.tgz openclaw.tgz
+          mv openclaw-*.tgz openclaw-with-hardlinks.tgz
+          mkdir -p _repack
+          tar -xzf openclaw-with-hardlinks.tgz -C _repack
+          # Re-pack from the extracted tree — extraction collapses hardlinks
+          # into regular files, so the new tarball contains real file copies.
+          tar --hard-dereference -czf openclaw.tgz -C _repack package
+          rm -rf _repack openclaw-with-hardlinks.tgz
           ls -lh openclaw.tgz
+          # Verify the smoking-gun file is a real entry, not a hardlink.
+          tar -tvzf openclaw.tgz | grep "pi-agent-core/dist/types.js$" || (echo "ERROR: types.js missing from re-packed tarball" && exit 1)
 
       - name: Create GitHub Release and upload tarball
         uses: softprops/action-gh-release@v2
