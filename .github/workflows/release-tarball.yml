@@ -25,9 +25,11 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Setup pnpm
+        # Read pnpm version from package.json's `packageManager` field so
+        # we don't have to bump this workflow every time upstream updates
+        # pnpm. The action picks it up automatically when `version` is
+        # omitted.
         uses: pnpm/action-setup@v4
-        with:
-          version: 10.32.1
 
       - name: Setup Node
         uses: actions/setup-node@v4
