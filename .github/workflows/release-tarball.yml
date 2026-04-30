@@ -101,42 +101,72 @@ jobs:
             console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
           "
 
-      - name: Pack tarball (npm pack + dereference hardlinks)
+      - name: Pack tarball (npm pack + Python hardlink dereferencer)
         env:
           # Tells the prepack hook to skip rebuilding and just verify
-          # that the dist/ we produced above is intact. Required so the
-          # marker we just wrote isn't blown away by a fresh build.
+          # that the dist/ we produced above is intact.
           OPENCLAW_PREPACK_PREPARED: "1"
-        # Use `npm pack` instead of `pnpm pack`: at 4.27 with 119
-        # bundled extensions, the dynamically-populated
-        # bundleDependencies array (~200 entries from
-        # discoverBundledPluginRuntimeDeps) caused pnpm pack to hang
-        # silently for 60+ minutes — pnpm tried to reconcile npm-rooted
-        # node_modules from postinstall-bundled-plugins.mjs against the
-        # pnpm lockfile and never returned. npm pack honors
-        # bundleDependencies directly from package.json without any
-        # lockfile dance and produces the same wire format.
+        # `pnpm pack` hangs forever on the ~200-entry bundleDependencies
+        # array we synthesize for 4.27's 119 bundled extensions — pnpm
+        # tries to reconcile its own lockfile against npm-rooted
+        # node_modules and never returns.
         #
-        # IMPORTANT: npm pack writes HARDLINKS for content-deduplicated
-        # files (e.g. @mariozechner/pi-agent-core/dist/types.js → hardlinks
-        # to @mariozechner/pi-ai/dist/types.js). The VM-side install does
-        # `tar -xzf openclaw.tgz --strip-components=1` which silently fails
-        # to resolve those hardlinks → missing files at runtime → gateway
-        # crashes with ERR_MODULE_NOT_FOUND. Re-pack after extraction to
-        # convert hardlinks into regular file copies, sidestepping the
-        # whole class of problem.
+        # `npm pack` produces a working tarball IN ITS OWN FORMAT, but it
+        # writes HARDLINKS for content-deduplicated files. Those hardlinks
+        # are ORDERED BEFORE their targets in the archive, which means:
+        #   - VM-side `tar -xzf openclaw.tgz` extracts the hardlink as a
+        #     stub before the target file exists → file ends up missing
+        #     on disk → gateway crashes with ERR_MODULE_NOT_FOUND.
+        #   - Re-extracting on the runner with `tar -xzf` ALSO fails for
+        #     the same reason — can't unpack to repack.
+        #
+        # Fix: rewrite the tarball in-place using Python's `tarfile`,
+        # which can resolve hardlinks at read-time (it reads the target
+        # member by name, regardless of stream order). Each hardlink
+        # entry becomes a regular file with the target's content.
         run: |
           npm pack --silent --pack-destination .
           mv openclaw-*.tgz openclaw-with-hardlinks.tgz
-          mkdir -p _repack
-          tar -xzf openclaw-with-hardlinks.tgz -C _repack
-          # Re-pack from the extracted tree — extraction collapses hardlinks
-          # into regular files, so the new tarball contains real file copies.
-          tar --hard-dereference -czf openclaw.tgz -C _repack package
-          rm -rf _repack openclaw-with-hardlinks.tgz
+          python3 - <<'PY'
+          import tarfile, sys
+          src_path = "openclaw-with-hardlinks.tgz"
+          dst_path = "openclaw.tgz"
+          rewritten = 0
+          with tarfile.open(src_path, "r:gz") as src, tarfile.open(dst_path, "w:gz") as dst:
+              for entry in src:
+                  if entry.islnk():
+                      try:
+                          target = src.getmember(entry.linkname)
+                      except KeyError:
+                          print(f"WARN: hardlink target missing: {entry.name} -> {entry.linkname}", file=sys.stderr)
+                          dst.addfile(entry)
+                          continue
+                      entry.type = tarfile.REGTYPE
+                      entry.size = target.size
+                      data = src.extractfile(target)
+                      dst.addfile(entry, data)
+                      rewritten += 1
+                  elif entry.isfile():
+                      dst.addfile(entry, src.extractfile(entry))
+                  else:
+                      dst.addfile(entry)
+          print(f"rewrote {rewritten} hardlinks as regular files")
+          PY
+          rm -f openclaw-with-hardlinks.tgz
           ls -lh openclaw.tgz
-          # Verify the smoking-gun file is a real entry, not a hardlink.
-          tar -tvzf openclaw.tgz | grep "pi-agent-core/dist/types.js$" || (echo "ERROR: types.js missing from re-packed tarball" && exit 1)
+          # Verify smoking-gun file (the one that broke 4.27 install) is a
+          # real entry, sized like the real file, not a 0-byte hardlink stub.
+          line=$(tar -tvzf openclaw.tgz | grep "pi-agent-core/dist/types\.js$" || true)
+          if [ -z "$line" ]; then
+            echo "ERROR: types.js missing from rewritten tarball" >&2
+            exit 1
+          fi
+          echo "types.js entry: $line"
+          size=$(echo "$line" | awk '{print $3}')
+          if [ "$size" -lt 1000 ]; then
+            echo "ERROR: types.js size=$size suspiciously small (still a stub?)" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release and upload tarball
         uses: softprops/action-gh-release@v2
