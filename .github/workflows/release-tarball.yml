@@ -48,6 +48,20 @@ jobs:
           pnpm build
           pnpm ui:build
 
+      - name: Apply Clawy IPI + JITI memoize patches
+        # Two memoization patches that take dispatch on a 2 GB Hetzner cx23
+        # from ~280s → ~70s with 121 bundled plugins:
+        #   1. loadInstalledPluginIndex memoize — runtime rebuilds the
+        #      bundled-plugin index 60+ times per dispatch over the same
+        #      effective inputs.
+        #   2. registerBundledRuntimeDependencyJitiAliases memoize — re-walks
+        #      every bundled plugin's package.json + transitive dep tree on
+        #      every plugin load.
+        # See scripts/clawy-patch-ipi-memoize.mjs. Idempotent, content-based
+        # match (chunk filenames rotate between releases). Drop this step
+        # when upstream memoizes natively.
+        run: node scripts/clawy-patch-ipi-memoize.mjs dist
+
       - name: Write Clawy release marker
         # Drops a small JSON marker into dist/ identifying the fork tag.
         # The CLI on each VM reads this at metrics-push time, so the
