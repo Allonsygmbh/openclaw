@@ -60,7 +60,12 @@ jobs:
         # See scripts/clawy-patch-ipi-memoize.mjs. Idempotent, content-based
         # match (chunk filenames rotate between releases). Drop this step
         # when upstream memoizes natively.
-        run: node scripts/clawy-patch-ipi-memoize.mjs dist
+        run: |
+          node scripts/clawy-patch-ipi-memoize.mjs dist
+          echo "=== marker check immediately after patch ==="
+          grep -lc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+          echo "=== ipi store sha256 (post-patch) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
 
       - name: Write Clawy release marker
         # Drops a small JSON marker into dist/ identifying the fork tag.
@@ -114,6 +119,15 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
             console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
           "
+
+      - name: Verify patches still present pre-pack
+        run: |
+          echo "=== ipi store sha256 (pre-pack) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
+          echo "=== loader sha256 (pre-pack) ==="
+          sha256sum dist/loader-*.js
+          echo "=== marker count in dist (pre-pack) ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
 
       - name: Pack tarball (npm pack + Python hardlink dereferencer)
         env:
@@ -190,6 +204,23 @@ jobs:
             exit 1
           fi
           rm -rf _verify
+
+      - name: Verify Clawy patch markers in final tarball
+        # Sanity: extract the tarball one more time and confirm both
+        # memoize patches survived pack. Hard-fail if missing — we'd
+        # rather not ship a tarball that silently lost the perf patches.
+        run: |
+          set -euo pipefail
+          mkdir -p _final && tar -xzf openclaw.tgz -C _final 2>/dev/null || true
+          ipi_count=$(grep -rc "CLAWY_IPI_MEMOIZE" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          jiti_count=$(grep -rc "CLAWY_JITI_ALIAS" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          echo "tarball IPI marker count: $ipi_count"
+          echo "tarball JITI marker count: $jiti_count"
+          rm -rf _final
+          if [ "$ipi_count" -lt 1 ] || [ "$jiti_count" -lt 2 ]; then
+            echo "ERROR: tarball missing Clawy patch markers (IPI=$ipi_count expected >=1, JITI=$jiti_count expected >=2)" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release and upload tarball
         uses: softprops/action-gh-release@v2
