@@ -129,10 +129,34 @@ jobs:
           echo "=== marker count in dist (pre-pack) ==="
           grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
 
-      - name: Pack tarball (npm pack + Python hardlink dereferencer)
+      - name: Run prepack side-effects (dist inventory + smoke test)
+        # `npm pack` runs `prepack` (`scripts/openclaw-prepack.ts`), which
+        # unconditionally re-runs `pnpm build` + `pnpm ui:build` —
+        # overwriting our IPI/JITI memoize patches in dist/. The
+        # `OPENCLAW_PREPACK_PREPARED` flag only suppresses *verification*
+        # failures, it does NOT skip the rebuild.
+        #
+        # Workaround: manually run the other side-effects prepack does
+        # (dist inventory + bundled-channel smoke test), then call npm
+        # pack with `--ignore-scripts` so it doesn't run prepack at all.
+        # That way our patched dist/ survives into the tarball.
+        run: |
+          node --import tsx -e "
+            import { writePackageDistInventory } from './src/infra/package-dist-inventory.ts';
+            await writePackageDistInventory(process.cwd());
+            console.log('dist inventory written');
+          "
+          node scripts/test-built-bundled-channel-entry-smoke.mjs
+
+      - name: Verify patches STILL present after prepack side-effects
+        run: |
+          echo "=== marker count post-side-effects ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+
+      - name: Pack tarball (npm pack --ignore-scripts + hardlink dereferencer)
         env:
-          # Tells the prepack hook to skip rebuilding and just verify
-          # that the dist/ we produced above is intact.
+          # No-op now that we use --ignore-scripts, but keep set for any
+          # reach-throughs. The real protection is --ignore-scripts below.
           OPENCLAW_PREPACK_PREPARED: "1"
         # `pnpm pack` hangs forever on the ~200-entry bundleDependencies
         # array we synthesize for 4.27's 119 bundled extensions — pnpm
@@ -153,7 +177,7 @@ jobs:
         # member by name, regardless of stream order). Each hardlink
         # entry becomes a regular file with the target's content.
         run: |
-          npm pack --silent --pack-destination .
+          npm pack --silent --ignore-scripts --pack-destination .
           mv openclaw-*.tgz openclaw-with-hardlinks.tgz
           python3 - <<'PY'
           import tarfile, sys
