@@ -48,6 +48,25 @@ jobs:
           pnpm build
           pnpm ui:build
 
+      - name: Apply Clawy IPI + JITI memoize patches
+        # Two memoization patches that take dispatch on a 2 GB Hetzner cx23
+        # from ~280s → ~70s with 121 bundled plugins:
+        #   1. loadInstalledPluginIndex memoize — runtime rebuilds the
+        #      bundled-plugin index 60+ times per dispatch over the same
+        #      effective inputs.
+        #   2. registerBundledRuntimeDependencyJitiAliases memoize — re-walks
+        #      every bundled plugin's package.json + transitive dep tree on
+        #      every plugin load.
+        # See scripts/clawy-patch-ipi-memoize.mjs. Idempotent, content-based
+        # match (chunk filenames rotate between releases). Drop this step
+        # when upstream memoizes natively.
+        run: |
+          node scripts/clawy-patch-ipi-memoize.mjs dist
+          echo "=== marker check immediately after patch ==="
+          grep -lc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+          echo "=== ipi store sha256 (post-patch) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
+
       - name: Write Clawy release marker
         # Drops a small JSON marker into dist/ identifying the fork tag.
         # The CLI on each VM reads this at metrics-push time, so the
@@ -101,10 +120,43 @@ jobs:
             console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
           "
 
-      - name: Pack tarball (npm pack + Python hardlink dereferencer)
+      - name: Verify patches still present pre-pack
+        run: |
+          echo "=== ipi store sha256 (pre-pack) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
+          echo "=== loader sha256 (pre-pack) ==="
+          sha256sum dist/loader-*.js
+          echo "=== marker count in dist (pre-pack) ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+
+      - name: Run prepack side-effects (dist inventory + smoke test)
+        # `npm pack` runs `prepack` (`scripts/openclaw-prepack.ts`), which
+        # unconditionally re-runs `pnpm build` + `pnpm ui:build` —
+        # overwriting our IPI/JITI memoize patches in dist/. The
+        # `OPENCLAW_PREPACK_PREPARED` flag only suppresses *verification*
+        # failures, it does NOT skip the rebuild.
+        #
+        # Workaround: manually run the other side-effects prepack does
+        # (dist inventory + bundled-channel smoke test), then call npm
+        # pack with `--ignore-scripts` so it doesn't run prepack at all.
+        # That way our patched dist/ survives into the tarball.
+        run: |
+          node --import tsx -e "
+            import { writePackageDistInventory } from './src/infra/package-dist-inventory.ts';
+            await writePackageDistInventory(process.cwd());
+            console.log('dist inventory written');
+          "
+          node scripts/test-built-bundled-channel-entry-smoke.mjs
+
+      - name: Verify patches STILL present after prepack side-effects
+        run: |
+          echo "=== marker count post-side-effects ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+
+      - name: Pack tarball (npm pack --ignore-scripts + hardlink dereferencer)
         env:
-          # Tells the prepack hook to skip rebuilding and just verify
-          # that the dist/ we produced above is intact.
+          # No-op now that we use --ignore-scripts, but keep set for any
+          # reach-throughs. The real protection is --ignore-scripts below.
           OPENCLAW_PREPACK_PREPARED: "1"
         # `pnpm pack` hangs forever on the ~200-entry bundleDependencies
         # array we synthesize for 4.27's 119 bundled extensions — pnpm
@@ -125,7 +177,7 @@ jobs:
         # member by name, regardless of stream order). Each hardlink
         # entry becomes a regular file with the target's content.
         run: |
-          npm pack --silent --pack-destination .
+          npm pack --silent --ignore-scripts --pack-destination .
           mv openclaw-*.tgz openclaw-with-hardlinks.tgz
           python3 - <<'PY'
           import tarfile, sys
@@ -176,6 +228,23 @@ jobs:
             exit 1
           fi
           rm -rf _verify
+
+      - name: Verify Clawy patch markers in final tarball
+        # Sanity: extract the tarball one more time and confirm both
+        # memoize patches survived pack. Hard-fail if missing — we'd
+        # rather not ship a tarball that silently lost the perf patches.
+        run: |
+          set -euo pipefail
+          mkdir -p _final && tar -xzf openclaw.tgz -C _final 2>/dev/null || true
+          ipi_count=$(grep -rc "CLAWY_IPI_MEMOIZE" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          jiti_count=$(grep -rc "CLAWY_JITI_ALIAS" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          echo "tarball IPI marker count: $ipi_count"
+          echo "tarball JITI marker count: $jiti_count"
+          rm -rf _final
+          if [ "$ipi_count" -lt 1 ] || [ "$jiti_count" -lt 2 ]; then
+            echo "ERROR: tarball missing Clawy patch markers (IPI=$ipi_count expected >=1, JITI=$jiti_count expected >=2)" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release and upload tarball
         uses: softprops/action-gh-release@v2
