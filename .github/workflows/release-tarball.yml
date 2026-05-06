@@ -153,7 +153,7 @@ jobs:
           echo "=== marker count post-side-effects ==="
           grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
 
-      - name: Pack tarball (npm pack --ignore-scripts + hardlink dereferencer)
+      - name: Pack tarball (npm pack + node-tar extract + GNU tar repack)
         env:
           # No-op now that we use --ignore-scripts, but keep set for any
           # reach-throughs. The real protection is --ignore-scripts below.
@@ -161,62 +161,65 @@ jobs:
         # `pnpm pack` hangs forever on the ~200-entry bundleDependencies
         # array we synthesize for 4.27's 119 bundled extensions — pnpm
         # tries to reconcile its own lockfile against npm-rooted
-        # node_modules and never returns.
+        # node_modules and never returns. So we use `npm pack`.
         #
         # `npm pack` produces a working tarball IN ITS OWN FORMAT, but it
-        # writes HARDLINKS for content-deduplicated files. Those hardlinks
-        # are ORDERED BEFORE their targets in the archive, which means:
+        # writes HARDLINKS for content-deduplicated files. Hardlinks are
+        # often ordered BEFORE their targets in the archive, so:
         #   - VM-side `tar -xzf openclaw.tgz` extracts the hardlink as a
         #     stub before the target file exists → file ends up missing
         #     on disk → gateway crashes with ERR_MODULE_NOT_FOUND.
-        #   - Re-extracting on the runner with `tar -xzf` ALSO fails for
-        #     the same reason — can't unpack to repack.
         #
-        # Fix: rewrite the tarball in-place using Python's `tarfile`,
-        # which can resolve hardlinks at read-time (it reads the target
-        # member by name, regardless of stream order). Each hardlink
-        # entry becomes a regular file with the target's content.
+        # Previous fix (Python tarfile rewriter) produced an archive that
+        # GNU tar could mostly read with "Skipping to next header" warnings,
+        # but pacote / node-tar silently dropped ~17 chunks (e.g.
+        # `sqlite-wal--tjt8qW0.js`) mid-stream. The verification step
+        # passed because the canary file was always present, but real
+        # `npm install -g openclaw.tgz` consumers ended up with missing
+        # modules.
+        #
+        # Current fix:
+        #   1. `npm pack` to get the source tarball with hardlinks.
+        #   2. `node-tar` extracts it into a staging dir — node-tar resolves
+        #      hardlinks natively, so every file lands as a complete copy.
+        #   3. GNU `tar` repacks from the staging dir into a clean archive.
+        #      Output is plain ustar with regular files only (no hardlinks),
+        #      so every consumer (`tar -xzf`, npm pacote, node-tar) extracts
+        #      the same complete set.
+        #   4. Re-extract and verify file count + canary as before.
         run: |
+          set -euo pipefail
+          # node-tar isn't a project dependency (the upstream repo doesn't
+          # need it for runtime); install once into a throw-away workspace
+          # so we don't pollute lockfiles or root node_modules.
+          npm install --silent --no-audit --no-fund --no-save --prefix=./.tar-tooling tar
+          export NODE_PATH="$(pwd)/.tar-tooling/node_modules"
+
           npm pack --silent --ignore-scripts --pack-destination .
-          mv openclaw-*.tgz openclaw-with-hardlinks.tgz
-          python3 - <<'PY'
-          import tarfile, sys
-          src_path = "openclaw-with-hardlinks.tgz"
-          dst_path = "openclaw.tgz"
-          rewritten = 0
-          with tarfile.open(src_path, "r:gz") as src, tarfile.open(dst_path, "w:gz") as dst:
-              for entry in src:
-                  if entry.islnk():
-                      try:
-                          target = src.getmember(entry.linkname)
-                      except KeyError:
-                          print(f"WARN: hardlink target missing: {entry.name} -> {entry.linkname}", file=sys.stderr)
-                          dst.addfile(entry)
-                          continue
-                      entry.type = tarfile.REGTYPE
-                      entry.size = target.size
-                      data = src.extractfile(target)
-                      dst.addfile(entry, data)
-                      rewritten += 1
-                  elif entry.isfile():
-                      dst.addfile(entry, src.extractfile(entry))
-                  else:
-                      dst.addfile(entry)
-          print(f"rewrote {rewritten} hardlinks as regular files")
-          PY
-          rm -f openclaw-with-hardlinks.tgz
+          PACKED="$(ls openclaw-*.tgz | head -1)"
+          [ -n "$PACKED" ] || { echo "npm pack produced no tarball" >&2; exit 1; }
+
+          mkdir -p _staging
+          node --input-type=commonjs -e "
+            const tar = require('tar');
+            tar.extract({ file: '${PACKED}', cwd: '_staging', sync: true });
+            console.log('node-tar extract: ${PACKED} -> _staging');
+          "
+          rm -f "${PACKED}"
+
+          # GNU tar emits a clean ustar archive. Sort for reproducibility;
+          # zero ownership so the content hash tracks file content only.
+          # mtimes are inherited from npm pack's epoch (1985-10-26), already
+          # stable across builds.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              -czf openclaw.tgz -C _staging package
+          rm -rf _staging .tar-tooling
           ls -lh openclaw.tgz
-          # Verify by extracting — the only test that actually mirrors what
-          # the VM-side install does. Counts files extracted as a sanity
-          # gate against future regressions where hardlink targets are
-          # silently dropped. Note: pi-agent-core/dist/types.js is a
-          # TypeScript types-only file ("export {};") — its real content
-          # is ~44 bytes, so don't add a size threshold here.
+
+          # Verify by extracting cleanly. With ustar output there should be
+          # NO "Skipping to next header" warnings; tar exits 0.
           mkdir -p _verify
-          # tar exits 2 because of "Skipping to next header" warnings on the
-          # rewritten hardlink entries. Extraction still completes correctly;
-          # silence stderr and ignore exit code, then validate by inspection.
-          tar -xzf openclaw.tgz -C _verify 2>/dev/null || true
+          tar -xzf openclaw.tgz -C _verify
           if [ ! -s _verify/package/node_modules/@mariozechner/pi-agent-core/dist/types.js ]; then
             echo "ERROR: pi-agent-core/dist/types.js missing or empty after extraction" >&2
             exit 1
@@ -227,6 +230,16 @@ jobs:
             echo "ERROR: only $file_count files extracted, expected 30000+" >&2
             exit 1
           fi
+          # Spot-check a handful of dist chunks that the previous Python
+          # rewriter silently dropped (sqlite-wal-* in particular surfaced
+          # as ERR_MODULE_NOT_FOUND on `npm install -g openclaw.tgz`). The
+          # chunk hashes rotate per build — match by stem only.
+          for stem in 'sqlite-wal--' 'runtime-' 'memory-'; do
+            if ! ls _verify/package/dist/${stem}*.js >/dev/null 2>&1; then
+              echo "ERROR: no dist chunk matching stem '${stem}*.js' found — possible silent drop" >&2
+              exit 1
+            fi
+          done
           rm -rf _verify
 
       - name: Verify Clawy patch markers in final tarball
