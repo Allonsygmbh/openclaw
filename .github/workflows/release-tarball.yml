@@ -211,7 +211,17 @@ jobs:
           # zero ownership so the content hash tracks file content only.
           # mtimes are inherited from npm pack's epoch (1985-10-26), already
           # stable across builds.
+          #
+          # --hard-dereference: node-tar's extract recreates source hardlinks
+          # on the staging filesystem (262 type-only `interfaces.js` files end
+          # up sharing one inode, etc.). Without --hard-dereference, GNU tar
+          # detects same-inode files and writes them back as hardlinks in the
+          # output tarball — same problem we set out to solve, just one layer
+          # down. Forcing dereference writes the actual file content for every
+          # entry, so the published archive has zero hardlinks regardless of
+          # what npm pack or node-tar did upstream.
           tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --hard-dereference \
               -czf openclaw.tgz -C _staging package
           rm -rf _staging .tar-tooling
           ls -lh openclaw.tgz
@@ -240,7 +250,42 @@ jobs:
               exit 1
             fi
           done
-          rm -rf _verify
+
+          # Hard-link audit: every entry in the published tarball must be a
+          # regular file. The previous bug was that hardlinks were ordered
+          # before their targets in npm pack output, so npm install -g (which
+          # processes the stream sequentially) extracted hardlinks into
+          # missing-target stubs and silently dropped the file content.
+          # --hard-dereference at repack should make this audit return zero;
+          # if it ever returns non-zero we shipped a regression.
+          hardlink_count=$(tar tvzf openclaw.tgz 2>/dev/null | awk '/^h/{c++} END{print c+0}')
+          if [ "$hardlink_count" -ne 0 ]; then
+            echo "ERROR: tarball contains $hardlink_count hardlink entries — must be 0" >&2
+            tar tvzf openclaw.tgz 2>/dev/null | awk '/^h/' | head -5 >&2
+            exit 1
+          fi
+          echo "hardlink audit: 0 hardlinks (good)"
+
+          # End-to-end smoke test: replicate the consumer install path
+          # exactly so we catch ANY ERR_MODULE_NOT_FOUND before publishing.
+          # `openclaw gateway --help` triggers the full runtime import graph
+          # (tslog → interfaces.js → ...), unlike `--version` which only
+          # reads package.json and would silently pass through a broken
+          # bundleDependency.
+          mkdir -p _smoke && pushd _smoke >/dev/null
+          npm install -g --silent --no-audit --no-fund --ignore-scripts \
+            --prefix=./prefix ../openclaw.tgz 2>&1 | tail -3
+          OPENCLAW_BIN="$(find prefix -name openclaw -executable -type f | head -1)"
+          if [ -z "$OPENCLAW_BIN" ]; then
+            OPENCLAW_BIN="$(find prefix -name openclaw.mjs | head -1)"
+            [ -n "$OPENCLAW_BIN" ] && OPENCLAW_BIN="node $OPENCLAW_BIN"
+          fi
+          [ -n "$OPENCLAW_BIN" ] || { echo "ERROR: no openclaw bin in prefix"; exit 1; }
+          echo "openclaw bin: $OPENCLAW_BIN"
+          $OPENCLAW_BIN --version
+          $OPENCLAW_BIN gateway --help | head -3
+          popd >/dev/null
+          rm -rf _verify _smoke
 
       - name: Verify Clawy patch markers in final tarball
         # Sanity: extract the tarball one more time and confirm both
