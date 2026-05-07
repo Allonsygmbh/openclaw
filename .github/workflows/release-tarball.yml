@@ -153,7 +153,7 @@ jobs:
           echo "=== marker count post-side-effects ==="
           grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
 
-      - name: Pack tarball (npm pack + node-tar extract + GNU tar repack)
+      - name: Pack tarball (npm pack + Python two-pass extract + GNU tar repack)
         env:
           # No-op now that we use --ignore-scripts, but keep set for any
           # reach-throughs. The real protection is --ignore-scripts below.
@@ -163,67 +163,89 @@ jobs:
         # tries to reconcile its own lockfile against npm-rooted
         # node_modules and never returns. So we use `npm pack`.
         #
-        # `npm pack` produces a working tarball IN ITS OWN FORMAT, but it
-        # writes HARDLINKS for content-deduplicated files. Hardlinks are
-        # often ordered BEFORE their targets in the archive, so:
-        #   - VM-side `tar -xzf openclaw.tgz` extracts the hardlink as a
-        #     stub before the target file exists → file ends up missing
-        #     on disk → gateway crashes with ERR_MODULE_NOT_FOUND.
+        # `npm pack` produces a tarball with HARDLINKS for content-deduplicated
+        # files. The link record (header type 'h' / '1') can appear BEFORE the
+        # target's regular-file record in the archive stream — npm walks
+        # node_modules in directory order, but which inode-shared copy gets
+        # emitted as the target vs the link depends on whichever path npm
+        # visits first. With pnpm's heavy hardlinking, dozens of these
+        # forward-reference links happen per build.
         #
-        # Previous fix (Python tarfile rewriter) produced an archive that
-        # GNU tar could mostly read with "Skipping to next header" warnings,
-        # but pacote / node-tar silently dropped ~17 chunks (e.g.
-        # `sqlite-wal--tjt8qW0.js`) mid-stream. The verification step
-        # passed because the canary file was always present, but real
-        # `npm install -g openclaw.tgz` consumers ended up with missing
-        # modules.
+        # Forward-reference hardlinks are unhandled by streaming extractors:
+        #   - GNU `tar -xzf` errors out: "Cannot hard link to ...: No such
+        #     file or directory" → entry skipped → file missing on disk.
+        #   - `node-tar` silently writes the link record as a regular file
+        #     and drops the real content record when it shows up later →
+        #     also produces a missing file (different file, same outcome).
+        # Either way, a fraction of files are silently lost. Different files
+        # in different builds depending on inode walk order, which is why
+        # each release shipped with a different set of orphan-`.mjs.map`
+        # paths (the smoking-gun pattern is `.mjs.map` present without
+        # sibling `.mjs`).
         #
-        # Current fix:
-        #   1. `npm pack` to get the source tarball with hardlinks.
-        #   2. `node-tar` extracts it into a staging dir — node-tar resolves
-        #      hardlinks natively, so every file lands as a complete copy.
-        #   3. GNU `tar` repacks from the staging dir into a clean archive.
-        #      Output is plain ustar with regular files only (no hardlinks),
-        #      so every consumer (`tar -xzf`, npm pacote, node-tar) extracts
-        #      the same complete set.
-        #   4. Re-extract and verify file count + canary as before.
+        # Fix:
+        #   1. `npm pack` produces the source tarball (hardlinks and all).
+        #   2. **Python two-pass extract** into a staging dir:
+        #        Pass 1 — extract regulars, dirs, symlinks; queue hardlinks.
+        #        Pass 2 — for each queued hardlink, `cp` from the target's
+        #                 on-disk path (now materialized after pass 1) to
+        #                 the link path. Works regardless of archive order.
+        #   3. GNU `tar --hard-dereference` repacks the staging dir into a
+        #      clean ustar archive with regular files only (zero hardlinks).
+        #   4. Verify file count + canary + hardlink-count + orphan-mjs scan.
         run: |
           set -euo pipefail
-          # node-tar isn't a project dependency (the upstream repo doesn't
-          # need it for runtime); install once into a throw-away workspace
-          # so we don't pollute lockfiles or root node_modules.
-          npm install --silent --no-audit --no-fund --no-save --prefix=./.tar-tooling tar
-          export NODE_PATH="$(pwd)/.tar-tooling/node_modules"
-
           npm pack --silent --ignore-scripts --pack-destination .
           PACKED="$(ls openclaw-*.tgz | head -1)"
           [ -n "$PACKED" ] || { echo "npm pack produced no tarball" >&2; exit 1; }
 
           mkdir -p _staging
-          node --input-type=commonjs -e "
-            const tar = require('tar');
-            tar.extract({ file: '${PACKED}', cwd: '_staging', sync: true });
-            console.log('node-tar extract: ${PACKED} -> _staging');
-          "
+          PACKED="$PACKED" python3 - <<'PY'
+          import os, sys, shutil, tarfile
+          from pathlib import Path
+
+          src = os.environ["PACKED"]
+          dst = Path("_staging")
+          dst.mkdir(exist_ok=True)
+
+          hardlinks = []  # (link_name, link_target) — both archive-relative
+          with tarfile.open(src, "r:gz") as tf:
+              for m in tf:
+                  if m.islnk():
+                      hardlinks.append((m.name, m.linkname))
+                  else:
+                      tf.extract(m, dst, filter="data")
+          print(f"phase1: extracted regulars + dirs + symlinks; queued {len(hardlinks)} hardlinks", file=sys.stderr)
+
+          fixed = failed = 0
+          for link_name, link_target in hardlinks:
+              src_path = dst / link_target
+              dst_path = dst / link_name
+              dst_path.parent.mkdir(parents=True, exist_ok=True)
+              if src_path.exists():
+                  shutil.copy2(str(src_path), str(dst_path))
+                  fixed += 1
+              else:
+                  print(f"  WARN: hardlink target missing: {link_name} -> {link_target}", file=sys.stderr)
+                  failed += 1
+          print(f"phase2: fixed {fixed} hardlinks; failed {failed}", file=sys.stderr)
+          if failed > 0:
+              sys.exit(1)
+          PY
           rm -f "${PACKED}"
 
           # GNU tar emits a clean ustar archive. Sort for reproducibility;
           # zero ownership so the content hash tracks file content only.
           # mtimes are inherited from npm pack's epoch (1985-10-26), already
-          # stable across builds.
-          #
-          # --hard-dereference: node-tar's extract recreates source hardlinks
-          # on the staging filesystem (262 type-only `interfaces.js` files end
-          # up sharing one inode, etc.). Without --hard-dereference, GNU tar
-          # detects same-inode files and writes them back as hardlinks in the
-          # output tarball — same problem we set out to solve, just one layer
-          # down. Forcing dereference writes the actual file content for every
-          # entry, so the published archive has zero hardlinks regardless of
-          # what npm pack or node-tar did upstream.
+          # stable across builds. --hard-dereference here is belt-and-braces:
+          # the staging dir holds independent copies (Python copy2 above), so
+          # there are no shared inodes for GNU tar to detect — but in case
+          # the runner FS dedups under the hood, --hard-dereference forces
+          # full content per entry anyway.
           tar --sort=name --owner=0 --group=0 --numeric-owner \
               --hard-dereference \
               -czf openclaw.tgz -C _staging package
-          rm -rf _staging .tar-tooling
+          rm -rf _staging
           ls -lh openclaw.tgz
 
           # Verify by extracting cleanly. With ustar output there should be
@@ -250,6 +272,26 @@ jobs:
               exit 1
             fi
           done
+
+          # Orphan-.mjs.map audit: any .mjs.map without a matching .mjs
+          # is the smoking-gun pattern for the forward-reference hardlink
+          # bug we're fixing here. If pack extraction regresses (a future
+          # tooling change re-introduces the issue), this catches it before
+          # publish.
+          #
+          # Baseline of 3 lru-cache diagnostics-channel orphans is
+          # pre-existing in the source package — they ship .mjs.map without
+          # .mjs upstream. Allow them through.
+          mjs_files=$(tar -tzf openclaw.tgz | grep -E '\.mjs$' | sort)
+          mjs_maps=$(tar -tzf openclaw.tgz | grep -E '\.mjs\.map$' | sed 's/\.map$//' | sort)
+          orphans=$(comm -23 <(echo "$mjs_maps") <(echo "$mjs_files") \
+            | grep -vE 'lru-cache/dist/esm/(browser/|node/)?diagnostics-channel-(browser|esm|node)\.mjs$' || true)
+          if [ -n "$orphans" ]; then
+            echo "ERROR: orphan .mjs.map (no matching .mjs) — hardlink extraction regression?" >&2
+            echo "$orphans" | head -20 >&2
+            exit 1
+          fi
+          echo "orphan-mjs audit: clean (3 lru-cache baseline tolerated)"
 
           # Hard-link audit: every entry in the published tarball must be a
           # regular file. The previous bug was that hardlinks were ordered
