@@ -202,6 +202,7 @@ function prepareBundledPluginRuntimeDistMirror(params: {
     });
     markBundledRuntimeDistMirrorPrepared({ sourceDistRoot, mirrorDistRoot });
   }
+  mirrorBundledRuntimeWorkspaceTemplates({ sourceDistRoot, mirrorDistRoot });
   if (sourceDistRootName === "dist-runtime") {
     mirrorCanonicalBundledRuntimeDistRoot({
       installRoot: params.installRoot,
@@ -212,6 +213,38 @@ function prepareBundledPluginRuntimeDistMirror(params: {
   }
   ensureOpenClawPluginSdkAlias(mirrorDistRoot);
   return mirrorExtensionsRoot;
+}
+
+/**
+ * Mirror the workspace template directory (docs/reference/templates) from
+ * the source openclaw package into the dist mirror so the workspace-template
+ * resolver can find AGENTS.md / SOUL.md / etc. when running from inside the
+ * plugin-runtime-deps mirror — where resolveOpenClawPackageRoot returns null
+ * and the cwd / two-level fallback paths don't exist.
+ *
+ * Mirror target is `<mirrorDistRoot>/docs/reference/templates`, which matches
+ * the additional candidate added to `resolveWorkspaceTemplateDir`.
+ */
+function mirrorBundledRuntimeWorkspaceTemplates(params: {
+  sourceDistRoot: string;
+  mirrorDistRoot: string;
+}): void {
+  const sourcePackageRoot = path.dirname(params.sourceDistRoot);
+  const sourceTemplatesRoot = path.join(sourcePackageRoot, "docs", "reference", "templates");
+  if (!fs.existsSync(sourceTemplatesRoot)) {
+    return;
+  }
+  const mirrorTemplatesRoot = path.join(params.mirrorDistRoot, "docs", "reference", "templates");
+  if (path.resolve(sourceTemplatesRoot) === path.resolve(mirrorTemplatesRoot)) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(mirrorTemplatesRoot), { recursive: true, mode: 0o755 });
+  refreshBundledPluginRuntimeMirrorRoot({
+    pluginId: "openclaw-workspace-templates",
+    sourceRoot: sourceTemplatesRoot,
+    targetRoot: mirrorTemplatesRoot,
+    tempDirParent: path.dirname(mirrorTemplatesRoot),
+  });
 }
 
 function ensureBundledRuntimeMirrorDirectory(targetRoot: string): void {
@@ -302,6 +335,10 @@ function mirrorCanonicalBundledRuntimeDistRoot(params: {
       mirrorDistRoot: targetCanonicalDistRoot,
     });
   }
+  mirrorBundledRuntimeWorkspaceTemplates({
+    sourceDistRoot: sourceCanonicalDistRoot,
+    mirrorDistRoot: targetCanonicalDistRoot,
+  });
   ensureOpenClawPluginSdkAlias(targetCanonicalDistRoot);
 
   const pluginId = path.basename(params.pluginRoot);
