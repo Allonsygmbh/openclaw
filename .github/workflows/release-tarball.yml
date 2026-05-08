@@ -181,12 +181,25 @@ jobs:
         # Current fix:
         #   1. `npm pack` to get the source tarball with hardlinks.
         #   2. `node-tar` extracts it into a staging dir — node-tar resolves
-        #      hardlinks natively, so every file lands as a complete copy.
-        #   3. GNU `tar` repacks from the staging dir into a clean archive.
-        #      Output is plain ustar with regular files only (no hardlinks),
-        #      so every consumer (`tar -xzf`, npm pacote, node-tar) extracts
-        #      the same complete set.
-        #   4. Re-extract and verify file count + canary as before.
+        #      hardlinks natively, so every file lands with the right data.
+        #   3. `cp -r` _staging into _flat. Without `--preserve=links`, GNU
+        #      cp breaks hardlinks at copy time — every file in _flat is a
+        #      fresh inode (nlink=1) with its own copy of the data.
+        #   4. GNU `tar` packs _flat. No `--hard-dereference` needed: the
+        #      source already has zero hardlinks, so the output ustar archive
+        #      cannot contain any. Every consumer (`tar -xzf`, npm pacote,
+        #      node-tar) extracts the same complete set.
+        #
+        # Why `cp -r` instead of `tar --hard-dereference` (the previous
+        # approach): `--hard-dereference` worked locally but failed in
+        # GitHub Actions runners on 2026-05-08 — the GNU tar repack
+        # reliably wrote 0-byte stubs for several files (pi-agent-core/
+        # dist/types.js, ajv/dist/refs/json-schema-draft-07.json) even
+        # though the staging tree had the data and `tar tzf` reported zero
+        # hardlinks in the output. Failed across both the new tag and
+        # re-runs of the previously-working clawy-2026.4.27-5 tag, so it's
+        # a runner-environment regression in tar's --hard-dereference
+        # path, not our code. `cp -r` sidesteps that path entirely.
         run: |
           set -euo pipefail
           # node-tar isn't a project dependency (the upstream repo doesn't
@@ -207,21 +220,26 @@ jobs:
           "
           rm -f "${PACKED}"
 
-          # GNU tar emits a clean ustar archive. Sort for reproducibility;
-          # zero ownership so the content hash tracks file content only.
-          # mtimes are inherited from npm pack's epoch (1985-10-26), already
-          # stable across builds.
-          #
-          # --hard-dereference: node-tar's extract recreates source hardlinks
-          # on the staging filesystem (262 type-only `interfaces.js` files end
-          # up sharing one inode, etc.). Without --hard-dereference, GNU tar
-          # detects same-inode files and writes them back as hardlinks in the
-          # output tarball — same problem we set out to solve, just one layer
-          # down. Forcing dereference writes the actual file content for every
-          # entry, so the published archive has zero hardlinks regardless of
-          # what npm pack or node-tar did upstream.
+          # Break all hardlinks via cp -r (without --preserve=links).
+          # See block comment above for why this replaces --hard-dereference.
+          mkdir -p _flat
+          cp -r _staging/package _flat/
+          rm -rf _staging
+          mv _flat _staging
+
+          remaining_hardlinks=$(find _staging -type f -links +1 | wc -l)
+          if [ "$remaining_hardlinks" -ne 0 ]; then
+            echo "ERROR: $remaining_hardlinks files in _staging still have nlink>1 after cp -r" >&2
+            find _staging -type f -links +1 | head -10 >&2
+            exit 1
+          fi
+          echo "staging hardlink dedup: 0 files with nlink>1 (good)"
+
+          # GNU tar emits a clean ustar archive from a hardlink-free source.
+          # Sort for reproducibility; zero ownership so the content hash
+          # tracks file content only. mtimes are inherited from npm pack's
+          # epoch (1985-10-26), already stable across builds.
           tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --hard-dereference \
               -czf openclaw.tgz -C _staging package
           rm -rf _staging .tar-tooling
           ls -lh openclaw.tgz
