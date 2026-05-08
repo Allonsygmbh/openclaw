@@ -29,9 +29,15 @@ export async function resolveWorkspaceTemplateDir(opts?: {
     const cwd = opts?.cwd ?? process.cwd();
 
     const packageRoot = await resolveOpenClawPackageRoot({ moduleUrl, argv1, cwd });
+    const moduleDir = path.dirname(fileURLToPath(moduleUrl));
     const candidates = [
       packageRoot ? path.join(packageRoot, "docs", "reference", "templates") : null,
       cwd ? path.resolve(cwd, "docs", "reference", "templates") : null,
+      // Plugin-runtime-deps mirror layout: when the module loaded from a
+      // mirrored dist/ that is not part of a writable openclaw package
+      // (so resolveOpenClawPackageRoot returns null), the templates are
+      // staged alongside the dist mirror at <installRoot>/dist/docs/...
+      path.resolve(moduleDir, "docs", "reference", "templates"),
       FALLBACK_TEMPLATE_DIR,
     ].filter(Boolean) as string[];
 
