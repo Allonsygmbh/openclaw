@@ -107,6 +107,24 @@ jobs:
         # Run AFTER postinstall-bundled-plugins (so node_modules has the
         # plugin deps) and BEFORE pack so pnpm pack picks up the mutated
         # field. The edit is CI-only, not committed.
+        #
+        # IMPORTANT (2026-05-12): `npm pack` silently drops
+        # `bundleDependencies` entries that aren't also in `dependencies`
+        # (or peerDependencies/optionalDependencies). Without the deps
+        # mutation below, the plugin-declared deps get listed in the
+        # tarball's `bundleDependencies` metadata but their node_modules
+        # contents are NOT included in the tarball — measured directly:
+        # 65 of 108 declared bundled packages were missing from
+        # `clawy-2026.4.27-8`'s shipped tarball, including grammy
+        # (Telegram) and every other channel plugin. This caused VMs
+        # to fall back to runtime lazy-staging, which races with
+        # gateway hot-reload and breaks the plugin runtime loader.
+        #
+        # Fix: also add the critical channel deps to `dependencies`
+        # (with versions from the plugin manifest), so `npm pack`'s
+        # filter accepts them. Currently scoped to Telegram-required
+        # deps only to keep tarball size small (~60 MB). Expand
+        # CHANNEL_DEPS when bundling other channels.
         run: |
           node --input-type=module -e "
             import fs from 'node:fs';
@@ -114,10 +132,19 @@ jobs:
               await import('./scripts/postinstall-bundled-plugins.mjs');
             const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const main = Object.keys(p.dependencies || {});
-            const plugin = discoverBundledPluginRuntimeDeps().map(d => d.name);
+            const allPluginDeps = discoverBundledPluginRuntimeDeps();
+            const CHANNEL_DEPS = ['grammy', '@grammyjs/runner', '@grammyjs/transformer-throttler'];
+            p.dependencies = p.dependencies || {};
+            for (const dep of allPluginDeps) {
+              if (CHANNEL_DEPS.includes(dep.name) && !p.dependencies[dep.name]) {
+                p.dependencies[dep.name] = dep.version;
+              }
+            }
+            const plugin = allPluginDeps.map(d => d.name);
             p.bundleDependencies = [...new Set([...main, ...plugin])].sort();
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
             console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
+            console.log('dependencies count after channel-dep injection:', Object.keys(p.dependencies).length);
           "
 
       - name: Verify patches still present pre-pack
