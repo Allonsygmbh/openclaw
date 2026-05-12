@@ -282,9 +282,17 @@ jobs:
           # rewriter silently dropped (sqlite-wal-* in particular surfaced
           # as ERR_MODULE_NOT_FOUND on `npm install -g openclaw.tgz`). The
           # chunk hashes rotate per build — match by stem only.
-          for stem in 'sqlite-wal--' 'runtime-' 'memory-'; do
+          #
+          # Stems updated on v2026.5.x rebase: upstream now emits
+          # `sqlite-wal-<hash>.js` (single dash, was double) and the
+          # `runtime-`/`memory-` prefixes were broken up into many
+          # *.runtime-*.js subtypes. Pick chunks we know exist + would
+          # be at risk of a silent drop.
+          for stem in 'sqlite-wal-' 'installed-plugin-index-store-' 'sdk-alias-'; do
             if ! ls _verify/package/dist/${stem}*.js >/dev/null 2>&1; then
               echo "ERROR: no dist chunk matching stem '${stem}*.js' found — possible silent drop" >&2
+              echo "(available chunks matching stem):"
+              ls _verify/package/dist/ 2>/dev/null | grep "^${stem%-}" | head -10 >&2 || true
               exit 1
             fi
           done
