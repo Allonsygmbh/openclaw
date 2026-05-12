@@ -664,6 +664,21 @@ export function resolvePluginRuntimeModulePath(
       : [
           path.join(path.dirname(modulePath), "runtime", "index.ts"),
           path.join(path.dirname(modulePath), "runtime", "index.js"),
+          // Mirror context fallback: when running from a plugin-runtime-deps
+          // mirror (`~/.openclaw/plugin-runtime-deps/openclaw-<hash>/`), the
+          // calling module is at `<mirror>/dist/subsystem-X.js` and the
+          // runtime module is at `<mirror>/dist/plugins/runtime/index.js`
+          // (hardlinked from the main install). The package-root walk fails
+          // because the mirror's `package.json` is the stager's
+          // "openclaw-runtime-deps-install" manifest, which lacks the trust
+          // indicators (`./plugin-sdk` exports, `bin: openclaw`,
+          // `openclaw.mjs`). Without this fallback, every embedded-agent
+          // dispatch through a plugin loaded from the mirror throws
+          // "Unable to resolve plugin runtime module". The runtime files
+          // do exist on disk — we just need the right candidate path to
+          // find them.
+          path.join(path.dirname(modulePath), "plugins", "runtime", "index.js"),
+          path.join(path.dirname(modulePath), "plugins", "runtime", "index.ts"),
         ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
