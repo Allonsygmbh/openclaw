@@ -126,10 +126,30 @@ jobs:
         # deps only to keep tarball size small (~60 MB). Expand
         # CHANNEL_DEPS when bundling other channels.
         run: |
+          # NOTE (rebased to v2026.5.x): the old
+          # `discoverBundledPluginRuntimeDeps` helper was removed from
+          # scripts/postinstall-bundled-plugins.mjs in the upstream
+          # refactor (replaced by a different runtime path). The
+          # plugin dep data still lives in dist/extensions/*/package.json
+          # — we just inline the discovery here.
           node --input-type=module -e "
             import fs from 'node:fs';
-            const { discoverBundledPluginRuntimeDeps } =
-              await import('./scripts/postinstall-bundled-plugins.mjs');
+            import path from 'node:path';
+            function discoverBundledPluginRuntimeDeps(extensionsRoot = 'dist/extensions') {
+              const out = [];
+              if (!fs.existsSync(extensionsRoot)) return out;
+              for (const name of fs.readdirSync(extensionsRoot)) {
+                const pkgPath = path.join(extensionsRoot, name, 'package.json');
+                if (!fs.existsSync(pkgPath)) continue;
+                let pkg;
+                try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); }
+                catch { continue; }
+                for (const [depName, depVersion] of Object.entries(pkg.dependencies || {})) {
+                  out.push({ name: depName, version: depVersion });
+                }
+              }
+              return out;
+            }
             const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const main = Object.keys(p.dependencies || {});
             const allPluginDeps = discoverBundledPluginRuntimeDeps();
