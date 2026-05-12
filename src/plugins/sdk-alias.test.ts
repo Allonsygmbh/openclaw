@@ -1208,6 +1208,134 @@ export const syntheticRuntimeMarker = {
     });
     expect(resolved).toBe(expected === "dist" ? fixture.distFile : fixture.srcFile);
   });
+
+  // Regression coverage for the plugin-runtime-deps mirror context. The
+  // mirror's package.json is named "openclaw-runtime-deps-install" with no
+  // trust indicators (no `./plugin-sdk` export, no `bin: openclaw`, no
+  // `openclaw.mjs` sibling), so `resolveLoaderPackageRoot` returns null
+  // and we fall through to the sibling-search fallback. The runtime
+  // module physically exists at <mirror>/dist/plugins/runtime/index.js
+  // (hardlinked from the main install when the stager set up the dir),
+  // so the resolver must find it via the dist-sibling candidate.
+  it("falls back to dist/plugins/runtime/index.js when the calling module sits in a plugin-runtime-deps mirror without trust indicators", () => {
+    const mirrorRoot = makeTempDir();
+    const mirrorDistDir = path.join(mirrorRoot, "dist");
+    const mirrorRuntimeFile = path.join(mirrorDistDir, "plugins", "runtime", "index.js");
+    mkdirSafeDir(path.dirname(mirrorRuntimeFile));
+    fs.writeFileSync(
+      mirrorRuntimeFile,
+      "export const createPluginRuntime = () => ({});\n",
+      "utf-8",
+    );
+    // The stager's manifest — name and shape match what openclaw writes
+    // via `ensureNpmInstallExecutionManifest`. Critically: no exports
+    // map, no bin field, no openclaw.mjs sibling.
+    fs.writeFileSync(
+      path.join(mirrorRoot, "package.json"),
+      JSON.stringify(
+        { name: "openclaw-runtime-deps-install", private: true, dependencies: {} },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    const callingModule = path.join(mirrorDistDir, "subsystem-FimULsAo.js");
+    fs.writeFileSync(callingModule, "// stand-in for the bundled subsystem chunk\n", "utf-8");
+    // Explicit argv1 inside the mirror so the resolver can't fall back to
+    // process.argv[1] (which under vitest points at this very repo and
+    // would mask the mirror-only failure mode we're trying to cover).
+    const argv1 = path.join(mirrorRoot, "node_modules", ".bin", "fake-script");
+
+    const resolved = resolvePluginRuntimeModule({ modulePath: callingModule, argv1 });
+
+    expect(resolved).toBe(mirrorRuntimeFile);
+  });
+
+  // Negative case: even the new mirror fallback should NOT return a path
+  // when the runtime files don't physically exist in either the trusted
+  // package root or the dist-sibling candidates. Keeps the resolver
+  // strict — it always returns null on real "module is missing" cases.
+  it("returns null when neither the package-root walk nor the mirror fallback finds runtime files on disk", () => {
+    const orphanRoot = makeTempDir();
+    const orphanDistDir = path.join(orphanRoot, "dist");
+    mkdirSafeDir(orphanDistDir);
+    // Mirror-style manifest, but NO dist/plugins/runtime/index.js anywhere.
+    fs.writeFileSync(
+      path.join(orphanRoot, "package.json"),
+      JSON.stringify(
+        { name: "openclaw-runtime-deps-install", private: true, dependencies: {} },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    const callingModule = path.join(orphanDistDir, "subsystem-FimULsAo.js");
+    fs.writeFileSync(callingModule, "// stand-in\n", "utf-8");
+    const argv1 = path.join(orphanRoot, "node_modules", ".bin", "fake-script");
+
+    const resolved = resolvePluginRuntimeModule({ modulePath: callingModule, argv1 });
+
+    expect(resolved).toBeNull();
+  });
+
+  // Regression coverage for the production failure mode observed
+  // 2026-05-12 on pool VMs: the resolver's package-root walk returns
+  // a non-null packageRoot, but it's the wrong directory. Specifically,
+  // a `package.json` named "openclaw" left over in $HOME from an
+  // unrelated workspace seed (the api-server.js package, pre-rename)
+  // matches the openclaw-root predicate, but the dist files don't
+  // exist under that root. The pre-fix resolver tried only candidates
+  // derived from the (wrong) packageRoot and returned null. With the
+  // unconditional sibling fallback, the resolver finds the runtime
+  // module via dist-sibling instead.
+  it("falls back to the dist sibling when packageRoot is non-null but its derived candidates do not exist on disk (shadow openclaw package.json case)", () => {
+    // Create a fake "openclaw root" shadow — an ancestor dir with a
+    // package.json that satisfies the resolver's trust predicate but
+    // has NO dist/plugins/runtime files. Mirrors the production state
+    // of /home/openclaw/ which had {"name": "openclaw"} from the
+    // api-server.js workspace seed pre-rename.
+    const shadowRoot = makeTempDir();
+    fs.writeFileSync(
+      path.join(shadowRoot, "package.json"),
+      JSON.stringify({
+        name: "openclaw",
+        version: "1.0.0",
+        type: "commonjs",
+        exports: { "./plugin-sdk": "./does/not/exist.js" },
+        bin: { openclaw: "./does/not/exist.js" },
+      }),
+      "utf-8",
+    );
+    // No dist/ — packageRoot-derived candidates will miss.
+
+    // The mirror dir sits beneath the shadow root so the walker finds
+    // shadowRoot before any real openclaw root.
+    const mirrorDir = path.join(
+      shadowRoot,
+      ".openclaw",
+      "plugin-runtime-deps",
+      "openclaw-1.0.0-abc123",
+    );
+    const mirrorDistDir = path.join(mirrorDir, "dist");
+    const mirrorRuntimeFile = path.join(mirrorDistDir, "plugins", "runtime", "index.js");
+    mkdirSafeDir(path.dirname(mirrorRuntimeFile));
+    fs.writeFileSync(
+      mirrorRuntimeFile,
+      "export const createPluginRuntime = () => ({});\n",
+      "utf-8",
+    );
+    fs.writeFileSync(
+      path.join(mirrorDir, "package.json"),
+      JSON.stringify({ name: "openclaw-runtime-deps-install", private: true, dependencies: {} }),
+      "utf-8",
+    );
+    const callingModule = path.join(mirrorDistDir, "subsystem-FimULsAo.js");
+    fs.writeFileSync(callingModule, "// stand-in\n", "utf-8");
+
+    const resolved = resolvePluginRuntimeModule({ modulePath: callingModule });
+
+    expect(resolved).toBe(mirrorRuntimeFile);
+  });
 });
 
 describe("buildPluginLoaderAliasMap memoization", () => {

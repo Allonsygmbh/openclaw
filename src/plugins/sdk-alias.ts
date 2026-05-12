@@ -655,16 +655,44 @@ export function resolvePluginRuntimeModulePath(
       pluginSdkResolution: params.pluginSdkResolution,
     });
     const packageRoot = resolveLoaderPackageRoot({ ...params, modulePath });
-    const candidates = packageRoot
+    // Build candidates in priority order:
+    //   1. If the walk-up found a `packageRoot`, prefer candidates derived
+    //      from it. This is the correct path when the walker actually
+    //      found the real openclaw install root.
+    //   2. ALWAYS append the dist-sibling fallback. This catches two
+    //      production failure modes that (1) misses:
+    //
+    //      a) `packageRoot` is `null` — module loaded via a path that
+    //         doesn't sit under any trusted openclaw root.
+    //
+    //      b) `packageRoot` is non-null but *wrong* — observed 2026-05-12
+    //         on production pool VMs: the calling module sits inside a
+    //         plugin-runtime-deps mirror at `<mirror>/dist/subsystem-X.js`,
+    //         and the walker returns `/home/openclaw/` as packageRoot
+    //         because there's a `package.json` named "openclaw" left
+    //         over from an unrelated workspace seed (myclawy api-server,
+    //         pre-rename). Candidates derived from that fake root miss
+    //         (no `dist/plugins/runtime/` under `/home/openclaw/`), and
+    //         without the unconditional sibling fallback the resolver
+    //         returns null and every embedded-agent dispatch throws
+    //         "Unable to resolve plugin runtime module".
+    //
+    // The `fs.existsSync` check in the loop below keeps this strict —
+    // sibling candidates only resolve if the file actually exists.
+    const rootCandidates = packageRoot
       ? orderedKinds.map((kind) =>
           kind === "src"
             ? path.join(packageRoot, "src", "plugins", "runtime", "index.ts")
             : path.join(packageRoot, "dist", "plugins", "runtime", "index.js"),
         )
-      : [
-          path.join(path.dirname(modulePath), "runtime", "index.ts"),
-          path.join(path.dirname(modulePath), "runtime", "index.js"),
-        ];
+      : [];
+    const siblingCandidates = [
+      path.join(path.dirname(modulePath), "runtime", "index.ts"),
+      path.join(path.dirname(modulePath), "runtime", "index.js"),
+      path.join(path.dirname(modulePath), "plugins", "runtime", "index.js"),
+      path.join(path.dirname(modulePath), "plugins", "runtime", "index.ts"),
+    ];
+    const candidates = [...rootCandidates, ...siblingCandidates];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
         return candidate;
