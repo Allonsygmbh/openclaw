@@ -91,18 +91,23 @@ function applyContentPatch({ label, marker, needleRe, replacement, fingerprint }
       `[clawy-patch:${label}] needle regex did not match — upstream shape may have drifted.`,
     );
     if (containsFingerprint.length) {
-      console.error(
-        `  Chunks containing "${fingerprint}" (${containsFingerprint.length}):`,
-      );
+      console.error(`  Chunks containing "${fingerprint}" (${containsFingerprint.length}):`);
       for (const p of containsFingerprint.slice(0, 3)) {
         const src = fs.readFileSync(p, "utf8");
         const idx = src.indexOf(fingerprint);
         const window = src.slice(Math.max(0, idx - 80), idx + 240);
         console.error(`  ── ${p}:`);
-        console.error(window.split("\n").map((l) => "    | " + l).join("\n"));
+        console.error(
+          window
+            .split("\n")
+            .map((l) => "    | " + l)
+            .join("\n"),
+        );
       }
     } else {
-      console.error(`  No chunk contains "${fingerprint}" either — function may be in a separate chunk under ${dirAbs}.`);
+      console.error(
+        `  No chunk contains "${fingerprint}" either — function may be in a separate chunk under ${dirAbs}.`,
+      );
       dumpTree(dirAbs);
     }
     process.exit(2);
@@ -144,39 +149,17 @@ function loadInstalledPluginIndex(params = {}) {
 }`,
 });
 
-// ── Patch 2: registerBundledRuntimeDependencyJitiAliases memoize ─────────
+// JITI alias memoization removed on v2026.5.x: upstream now caches the
+// normalized jiti alias map natively via `normalizedJitiAliasMapCache`
+// (a `PluginLruCache` in src/plugins/sdk-alias.ts, landed before v2026.5.7).
+// Our two former `jiti-alias-*` patches targeted
+// `clearBundledRuntimeDependencyJitiAliases` and
+// `registerBundledRuntimeDependencyJitiAliases`, neither of which exist
+// in the upstream refactor. The IPI memoize above is still needed
+// because upstream hasn't memoized `loadInstalledPluginIndex` itself.
 //
-// We anchor on `clearBundledRuntimeDependencyJitiAliases() { … .clear(); }
-// function registerBundledRuntimeDependencyJitiAliases(rootDir) {` and
-// inject both the dedupe-set declaration above the clear fn and the
-// guard at the top of the register fn body. Done via two replaces on
-// separate anchors so we tolerate independent whitespace drift.
-applyContentPatch({
-  label: "jiti-alias-1-clear",
-  marker: "/*__CLAWY_JITI_ALIAS_MEMOIZE__*/",
-  fingerprint: "clearBundledRuntimeDependencyJitiAliases",
-  needleRe:
-    /function\s+clearBundledRuntimeDependencyJitiAliases\s*\(\s*\)\s*\{\s*bundledRuntimeDependencyJitiAliases\.clear\s*\(\s*\)\s*;?\s*\}/,
-  replacement: `/*__CLAWY_JITI_ALIAS_MEMOIZE__*/
-const _registeredJitiAliasRoots = new Set();
-function clearBundledRuntimeDependencyJitiAliases() {
-\tbundledRuntimeDependencyJitiAliases.clear();
-\t_registeredJitiAliasRoots.clear();
-}`,
-});
-
-applyContentPatch({
-  label: "jiti-alias-2-register",
-  marker: "/*__CLAWY_JITI_ALIAS_REGISTER_MEMOIZE__*/",
-  fingerprint: "registerBundledRuntimeDependencyJitiAliases",
-  // Match the function header and capture the original brace so we can
-  // re-emit it. Anchor on the rootDir param to avoid matching call sites.
-  needleRe:
-    /function\s+registerBundledRuntimeDependencyJitiAliases\s*\(\s*rootDir\s*\)\s*\{/,
-  replacement: `/*__CLAWY_JITI_ALIAS_REGISTER_MEMOIZE__*/
-function registerBundledRuntimeDependencyJitiAliases(rootDir) {
-\tif (_registeredJitiAliasRoots.has(rootDir)) return;
-\t_registeredJitiAliasRoots.add(rootDir);`,
-});
+// If we ever rebase back to a base that DOES still have the
+// `bundledRuntimeDependencyJitiAliases` Map, the two `applyContentPatch`
+// calls are in git history (commit a35bc850ea …).
 
 console.log("[clawy-patch] all patches applied");

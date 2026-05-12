@@ -313,12 +313,14 @@ jobs:
           set -euo pipefail
           mkdir -p _final && tar -xzf openclaw.tgz -C _final 2>/dev/null || true
           ipi_count=$(grep -rc "CLAWY_IPI_MEMOIZE" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
-          jiti_count=$(grep -rc "CLAWY_JITI_ALIAS" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
           echo "tarball IPI marker count: $ipi_count"
-          echo "tarball JITI marker count: $jiti_count"
           rm -rf _final
-          if [ "$ipi_count" -lt 1 ] || [ "$jiti_count" -lt 2 ]; then
-            echo "ERROR: tarball missing Clawy patch markers (IPI=$ipi_count expected >=1, JITI=$jiti_count expected >=2)" >&2
+          # JITI alias memoize was dropped on the v2026.5.x rebase: upstream
+          # now caches the normalized jiti alias map natively via
+          # `normalizedJitiAliasMapCache` in src/plugins/sdk-alias.ts. Only
+          # the IPI marker is required from now on.
+          if [ "$ipi_count" -lt 1 ]; then
+            echo "ERROR: tarball missing CLAWY_IPI_MEMOIZE marker (count=$ipi_count, expected >=1)" >&2
             exit 1
           fi
 
