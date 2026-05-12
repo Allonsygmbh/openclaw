@@ -1,0 +1,331 @@
+name: Release fork tarball
+
+on:
+  push:
+    tags:
+      - "clawy-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to (re)build from"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Pack step can take 15+ minutes when bundleDependencies covers
+    # 70+ packages and the upstream codebase has grown. Default 30 min
+    # timeout was too tight for 4.27. Bumped to 60 min with margin.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup pnpm
+        # Read pnpm version from package.json's `packageManager` field so
+        # we don't have to bump this workflow every time upstream updates
+        # pnpm. The action picks it up automatically when `version` is
+        # omitted.
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dist + UI
+        run: |
+          pnpm build
+          pnpm ui:build
+
+      - name: Apply Clawy IPI + JITI memoize patches
+        # Two memoization patches that take dispatch on a 2 GB Hetzner cx23
+        # from ~280s → ~70s with 121 bundled plugins:
+        #   1. loadInstalledPluginIndex memoize — runtime rebuilds the
+        #      bundled-plugin index 60+ times per dispatch over the same
+        #      effective inputs.
+        #   2. registerBundledRuntimeDependencyJitiAliases memoize — re-walks
+        #      every bundled plugin's package.json + transitive dep tree on
+        #      every plugin load.
+        # See scripts/clawy-patch-ipi-memoize.mjs. Idempotent, content-based
+        # match (chunk filenames rotate between releases). Drop this step
+        # when upstream memoizes natively.
+        run: |
+          node scripts/clawy-patch-ipi-memoize.mjs dist
+          echo "=== marker check immediately after patch ==="
+          grep -lc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+          echo "=== ipi store sha256 (post-patch) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
+
+      - name: Write Clawy release marker
+        # Drops a small JSON marker into dist/ identifying the fork tag.
+        # The CLI on each VM reads this at metrics-push time, so the
+        # admin UI can show "this VM is on clawy-2026.4.12-beta.1-1"
+        # rather than just "fork build". Upstream tarballs don't have
+        # this file, so its absence also signals upstream cleanly.
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          COMMIT="$(git rev-parse HEAD)"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > dist/clawy-release.json <<EOF
+          {
+            "tag": "${TAG}",
+            "commit": "${COMMIT}",
+            "built_at": "${BUILT_AT}"
+          }
+          EOF
+          cat dist/clawy-release.json
+
+      - name: Install bundled plugin runtime deps
+        # scripts/postinstall-bundled-plugins.mjs discovers each bundled
+        # plugin's declared runtime deps (from dist/extensions/*/package.json)
+        # and installs the missing ones into <root>/node_modules/ via npm.
+        # Normally this runs at `npm install -g` time on the target VM,
+        # but on 2 GB VMs that's a 4-minute npm install for ~36 plugin
+        # deps. Run it once here in CI — node_modules ends up with all
+        # the plugin deps, and the next step bundles them into the tarball.
+        run: node scripts/postinstall-bundled-plugins.mjs
+
+      - name: Bundle all runtime dependencies (main + plugin deps)
+        # `npm install -g <tarball>` on low-memory VMs (2 GB Hetzner base)
+        # gets OOM-killed because npm resolves + fetches all 70+ deps at
+        # install time, peaking at ~1.6 GB RSS. Pre-populate
+        # bundleDependencies with every key from `dependencies` + every
+        # plugin-declared dep so every runtime dep ships inside the
+        # tarball; install-time becomes a pure extract + bin-link with
+        # near-zero memory pressure AND no postinstall npm install.
+        # Run AFTER postinstall-bundled-plugins (so node_modules has the
+        # plugin deps) and BEFORE pack so pnpm pack picks up the mutated
+        # field. The edit is CI-only, not committed.
+        #
+        # IMPORTANT (2026-05-12): `npm pack` silently drops
+        # `bundleDependencies` entries that aren't also in `dependencies`
+        # (or peerDependencies/optionalDependencies). Without the deps
+        # mutation below, the plugin-declared deps get listed in the
+        # tarball's `bundleDependencies` metadata but their node_modules
+        # contents are NOT included in the tarball — measured directly:
+        # 65 of 108 declared bundled packages were missing from
+        # `clawy-2026.4.27-8`'s shipped tarball, including grammy
+        # (Telegram) and every other channel plugin. This caused VMs
+        # to fall back to runtime lazy-staging, which races with
+        # gateway hot-reload and breaks the plugin runtime loader.
+        #
+        # Fix: also add the critical channel deps to `dependencies`
+        # (with versions from the plugin manifest), so `npm pack`'s
+        # filter accepts them. Currently scoped to Telegram-required
+        # deps only to keep tarball size small (~60 MB). Expand
+        # CHANNEL_DEPS when bundling other channels.
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const { discoverBundledPluginRuntimeDeps } =
+              await import('./scripts/postinstall-bundled-plugins.mjs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const main = Object.keys(p.dependencies || {});
+            const allPluginDeps = discoverBundledPluginRuntimeDeps();
+            const CHANNEL_DEPS = ['grammy', '@grammyjs/runner', '@grammyjs/transformer-throttler'];
+            p.dependencies = p.dependencies || {};
+            for (const dep of allPluginDeps) {
+              if (CHANNEL_DEPS.includes(dep.name) && !p.dependencies[dep.name]) {
+                p.dependencies[dep.name] = dep.version;
+              }
+            }
+            const plugin = allPluginDeps.map(d => d.name);
+            p.bundleDependencies = [...new Set([...main, ...plugin])].sort();
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+            console.log('bundleDependencies count:', p.bundleDependencies.length, '(main:', main.length, 'plugin:', plugin.length + ')');
+            console.log('dependencies count after channel-dep injection:', Object.keys(p.dependencies).length);
+          "
+
+      - name: Verify patches still present pre-pack
+        run: |
+          echo "=== ipi store sha256 (pre-pack) ==="
+          sha256sum dist/installed-plugin-index-store-*.js
+          echo "=== loader sha256 (pre-pack) ==="
+          sha256sum dist/loader-*.js
+          echo "=== marker count in dist (pre-pack) ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+
+      - name: Run prepack side-effects (dist inventory + smoke test)
+        # `npm pack` runs `prepack` (`scripts/openclaw-prepack.ts`), which
+        # unconditionally re-runs `pnpm build` + `pnpm ui:build` —
+        # overwriting our IPI/JITI memoize patches in dist/. The
+        # `OPENCLAW_PREPACK_PREPARED` flag only suppresses *verification*
+        # failures, it does NOT skip the rebuild.
+        #
+        # Workaround: manually run the other side-effects prepack does
+        # (dist inventory + bundled-channel smoke test), then call npm
+        # pack with `--ignore-scripts` so it doesn't run prepack at all.
+        # That way our patched dist/ survives into the tarball.
+        run: |
+          node --import tsx -e "
+            import { writePackageDistInventory } from './src/infra/package-dist-inventory.ts';
+            await writePackageDistInventory(process.cwd());
+            console.log('dist inventory written');
+          "
+          node scripts/test-built-bundled-channel-entry-smoke.mjs
+
+      - name: Verify patches STILL present after prepack side-effects
+        run: |
+          echo "=== marker count post-side-effects ==="
+          grep -roc "CLAWY_IPI_MEMOIZE\|CLAWY_JITI_ALIAS" dist/installed-plugin-index-store-*.js dist/loader-*.js 2>/dev/null || true
+
+      - name: Pack tarball (npm pack + node-tar extract + GNU tar repack)
+        env:
+          # No-op now that we use --ignore-scripts, but keep set for any
+          # reach-throughs. The real protection is --ignore-scripts below.
+          OPENCLAW_PREPACK_PREPARED: "1"
+        # `pnpm pack` hangs forever on the ~200-entry bundleDependencies
+        # array we synthesize for 4.27's 119 bundled extensions — pnpm
+        # tries to reconcile its own lockfile against npm-rooted
+        # node_modules and never returns. So we use `npm pack`.
+        #
+        # `npm pack` produces a working tarball IN ITS OWN FORMAT, but it
+        # writes HARDLINKS for content-deduplicated files. Hardlinks are
+        # often ordered BEFORE their targets in the archive, so:
+        #   - VM-side `tar -xzf openclaw.tgz` extracts the hardlink as a
+        #     stub before the target file exists → file ends up missing
+        #     on disk → gateway crashes with ERR_MODULE_NOT_FOUND.
+        #
+        # Previous fix (Python tarfile rewriter) produced an archive that
+        # GNU tar could mostly read with "Skipping to next header" warnings,
+        # but pacote / node-tar silently dropped ~17 chunks (e.g.
+        # `sqlite-wal--tjt8qW0.js`) mid-stream. The verification step
+        # passed because the canary file was always present, but real
+        # `npm install -g openclaw.tgz` consumers ended up with missing
+        # modules.
+        #
+        # Current fix (2026-05-08): pre-resolve all hardlinks at the
+        # tarball level via scripts/clawy-resolve-tarball-hardlinks.mjs.
+        #
+        # Background: `npm pack` emits ~4500 hardlink entries in our
+        # 4.27 tarball. Earlier strategies tried to flatten them
+        # *after* extracting:
+        #   - `tar --hard-dereference` at re-pack: silently wrote 0-byte
+        #     stubs for several files (pi-agent-core/dist/types.js,
+        #     ajv/dist/refs/json-schema-draft-07.json) in GH Actions
+        #     runners even though the staging tree had the data.
+        #   - `cp -r` post-extract to break hardlinks: didn't help — by
+        #     the time `cp -r` ran, ~3000 entries were already missing.
+        # Both reproduced reliably in CI on 2026-05-08 across the failing
+        # tag AND a workflow_dispatch of the previously-working tag, so
+        # the bug is in the runner's tar/extract path, not in our code.
+        #
+        # The resolver script reads the npm pack tarball stream once,
+        # buffers each File's data into memory, then re-emits a fresh
+        # tarball where every Link entry is replaced by a regular File
+        # carrying the target's data. Output has zero hardlinks regardless
+        # of what GNU tar, node-tar's extract, or pacote's tar handler
+        # do downstream — there are no hardlinks to mishandle.
+        run: |
+          set -euo pipefail
+          # node-tar lives in the openclaw repo's own node_modules (it's
+          # a real dep). The resolver script imports from `tar` directly.
+          ls node_modules/tar/package.json >/dev/null
+
+          npm pack --silent --ignore-scripts --pack-destination .
+          PACKED="$(ls openclaw-*.tgz | head -1)"
+          [ -n "$PACKED" ] || { echo "npm pack produced no tarball" >&2; exit 1; }
+          ls -lh "$PACKED"
+
+          # Resolve hardlinks → flat tarball. Hard-fails if any link can't
+          # be resolved to its target, so we never ship a broken archive.
+          node scripts/clawy-resolve-tarball-hardlinks.mjs "$PACKED" openclaw.tgz
+          rm -f "$PACKED"
+          ls -lh openclaw.tgz
+
+          # Verify by extracting cleanly. With ustar output there should be
+          # NO "Skipping to next header" warnings; tar exits 0.
+          mkdir -p _verify
+          tar -xzf openclaw.tgz -C _verify
+          if [ ! -s _verify/package/node_modules/@mariozechner/pi-agent-core/dist/types.js ]; then
+            echo "ERROR: pi-agent-core/dist/types.js missing or empty after extraction" >&2
+            exit 1
+          fi
+          file_count=$(find _verify/package -type f | wc -l)
+          echo "verify: extracted $file_count files; canary types.js OK ($(wc -c < _verify/package/node_modules/@mariozechner/pi-agent-core/dist/types.js) bytes)"
+          if [ "$file_count" -lt 30000 ]; then
+            echo "ERROR: only $file_count files extracted, expected 30000+" >&2
+            exit 1
+          fi
+          # Spot-check a handful of dist chunks that the previous Python
+          # rewriter silently dropped (sqlite-wal-* in particular surfaced
+          # as ERR_MODULE_NOT_FOUND on `npm install -g openclaw.tgz`). The
+          # chunk hashes rotate per build — match by stem only.
+          for stem in 'sqlite-wal--' 'runtime-' 'memory-'; do
+            if ! ls _verify/package/dist/${stem}*.js >/dev/null 2>&1; then
+              echo "ERROR: no dist chunk matching stem '${stem}*.js' found — possible silent drop" >&2
+              exit 1
+            fi
+          done
+
+          # Hard-link audit: every entry in the published tarball must be a
+          # regular file. The previous bug was that hardlinks were ordered
+          # before their targets in npm pack output, so npm install -g (which
+          # processes the stream sequentially) extracted hardlinks into
+          # missing-target stubs and silently dropped the file content.
+          # --hard-dereference at repack should make this audit return zero;
+          # if it ever returns non-zero we shipped a regression.
+          hardlink_count=$(tar tvzf openclaw.tgz 2>/dev/null | awk '/^h/{c++} END{print c+0}')
+          if [ "$hardlink_count" -ne 0 ]; then
+            echo "ERROR: tarball contains $hardlink_count hardlink entries — must be 0" >&2
+            tar tvzf openclaw.tgz 2>/dev/null | awk '/^h/' | head -5 >&2
+            exit 1
+          fi
+          echo "hardlink audit: 0 hardlinks (good)"
+
+          # End-to-end smoke test: replicate the consumer install path
+          # exactly so we catch ANY ERR_MODULE_NOT_FOUND before publishing.
+          # `openclaw gateway --help` triggers the full runtime import graph
+          # (tslog → interfaces.js → ...), unlike `--version` which only
+          # reads package.json and would silently pass through a broken
+          # bundleDependency.
+          mkdir -p _smoke && pushd _smoke >/dev/null
+          npm install -g --silent --no-audit --no-fund --ignore-scripts \
+            --prefix=./prefix ../openclaw.tgz 2>&1 | tail -3
+          OPENCLAW_BIN="$(find prefix -name openclaw -executable -type f | head -1)"
+          if [ -z "$OPENCLAW_BIN" ]; then
+            OPENCLAW_BIN="$(find prefix -name openclaw.mjs | head -1)"
+            [ -n "$OPENCLAW_BIN" ] && OPENCLAW_BIN="node $OPENCLAW_BIN"
+          fi
+          [ -n "$OPENCLAW_BIN" ] || { echo "ERROR: no openclaw bin in prefix"; exit 1; }
+          echo "openclaw bin: $OPENCLAW_BIN"
+          $OPENCLAW_BIN --version
+          $OPENCLAW_BIN gateway --help | head -3
+          popd >/dev/null
+          rm -rf _verify _smoke
+
+      - name: Verify Clawy patch markers in final tarball
+        # Sanity: extract the tarball one more time and confirm both
+        # memoize patches survived pack. Hard-fail if missing — we'd
+        # rather not ship a tarball that silently lost the perf patches.
+        run: |
+          set -euo pipefail
+          mkdir -p _final && tar -xzf openclaw.tgz -C _final 2>/dev/null || true
+          ipi_count=$(grep -rc "CLAWY_IPI_MEMOIZE" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          jiti_count=$(grep -rc "CLAWY_JITI_ALIAS" _final/package/dist 2>/dev/null | awk -F: '{ s+=$2 } END { print s+0 }')
+          echo "tarball IPI marker count: $ipi_count"
+          echo "tarball JITI marker count: $jiti_count"
+          rm -rf _final
+          if [ "$ipi_count" -lt 1 ] || [ "$jiti_count" -lt 2 ]; then
+            echo "ERROR: tarball missing Clawy patch markers (IPI=$ipi_count expected >=1, JITI=$jiti_count expected >=2)" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release and upload tarball
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: openclaw.tgz
