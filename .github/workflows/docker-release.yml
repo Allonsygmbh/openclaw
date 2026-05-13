@@ -28,7 +28,7 @@ env:
 
 jobs:
   validate_manual_backfill:
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ (github.event_name == 'workflow_dispatch') && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 0
 
   approve_manual_backfill:
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ (github.event_name == 'workflow_dispatch') && github.repository == 'openclaw/openclaw' }}
     needs: validate_manual_backfill
     # WARNING: KEEP MANUAL BACKFILLS GATED BY THE docker-release ENVIRONMENT.
     runs-on: ubuntu-24.04
@@ -67,7 +67,7 @@ jobs:
   # Build amd64 image. Default and slim tags point to the same slim runtime.
   build-amd64:
     needs: [approve_manual_backfill]
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success') }}
+    if: ${{ (always() && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success')) && github.repository == 'openclaw/openclaw' }}
     # WARNING: DO NOT REVERT THIS TO A BLACKSMITH RUNNER WITHOUT RE-VALIDATING TAG BACKFILLS.
     runs-on: ubuntu-24.04
     permissions:
@@ -165,7 +165,7 @@ jobs:
   # Build arm64 image. Default and slim tags point to the same slim runtime.
   build-arm64:
     needs: [approve_manual_backfill]
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success') }}
+    if: ${{ (always() && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success')) && github.repository == 'openclaw/openclaw' }}
     # WARNING: DO NOT REVERT THIS TO A BLACKSMITH RUNNER WITHOUT RE-VALIDATING TAG BACKFILLS.
     runs-on: ubuntu-24.04-arm
     permissions:
@@ -263,7 +263,7 @@ jobs:
   # Create multi-platform manifests
   create-manifest:
     needs: [approve_manual_backfill, build-amd64, build-arm64]
-    if: ${{ always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success') }}
+    if: ${{ (always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.approve_manual_backfill.result == 'success')) && github.repository == 'openclaw/openclaw' }}
     # WARNING: DO NOT REVERT THIS TO A BLACKSMITH RUNNER WITHOUT RE-VALIDATING TAG BACKFILLS.
     runs-on: ubuntu-24.04
     permissions:
@@ -338,7 +338,7 @@ jobs:
 
   verify-attestations:
     needs: [create-manifest]
-    if: ${{ always() && needs.create-manifest.result == 'success' }}
+    if: ${{ (always() && needs.create-manifest.result == 'success') && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

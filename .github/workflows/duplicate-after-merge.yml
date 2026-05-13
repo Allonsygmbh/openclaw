@@ -32,6 +32,7 @@ env:
 
 jobs:
   close-duplicates:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout

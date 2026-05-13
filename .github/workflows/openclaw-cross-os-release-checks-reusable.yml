@@ -170,6 +170,7 @@ env:
 
 jobs:
   prepare:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     outputs:
       baseline_file_name: ${{ steps.baseline_metadata.outputs.file_name }}
@@ -489,6 +490,7 @@ jobs:
           echo "value=${MATRIX_JSON}" >> "$GITHUB_OUTPUT"
 
   cross_os_release_checks:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: "${{ matrix.display_name }} / ${{ matrix.suite_label }}"
     needs: prepare
     strategy:

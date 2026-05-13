@@ -71,6 +71,7 @@ env:
 
 jobs:
   resolve_target:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -240,7 +241,7 @@ jobs:
   prepare_release_package:
     name: Prepare release package artifact
     needs: [resolve_target]
-    if: contains(fromJSON('["all","cross-os","package"]'), needs.resolve_target.outputs.rerun_group) || (needs.resolve_target.outputs.rerun_group == 'live-e2e' && needs.resolve_target.outputs.live_suite_filter == '')
+    if: ${{ (contains(fromJSON('["all","cross-os","package"]'), needs.resolve_target.outputs.rerun_group) || (needs.resolve_target.outputs.rerun_group == 'live-e2e' && needs.resolve_target.outputs.live_suite_filter == '')) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -309,7 +310,7 @@ jobs:
 
   install_smoke_release_checks:
     needs: [resolve_target]
-    if: contains(fromJSON('["all","install-smoke"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","install-smoke"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     permissions:
       contents: read
       packages: write
@@ -320,7 +321,7 @@ jobs:
 
   cross_os_release_checks:
     needs: [resolve_target, prepare_release_package]
-    if: contains(fromJSON('["all","cross-os"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","cross-os"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     permissions: read-all
     uses: ./.github/workflows/openclaw-cross-os-release-checks-reusable.yml
     with:
@@ -342,7 +343,7 @@ jobs:
   live_repo_e2e_release_checks:
     name: Run repo/live E2E validation
     needs: [resolve_target]
-    if: contains(fromJSON('["all","live-e2e"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","live-e2e"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     permissions:
       actions: read
       contents: read
@@ -407,7 +408,7 @@ jobs:
   docker_e2e_release_checks:
     name: Run Docker release-path validation
     needs: [resolve_target, prepare_release_package]
-    if: contains(fromJSON('["all","live-e2e"]'), needs.resolve_target.outputs.rerun_group) && needs.resolve_target.outputs.live_suite_filter == ''
+    if: ${{ (contains(fromJSON('["all","live-e2e"]'), needs.resolve_target.outputs.rerun_group) && needs.resolve_target.outputs.live_suite_filter == '') && github.repository == 'openclaw/openclaw' }}
     permissions:
       actions: read
       contents: read
@@ -427,7 +428,7 @@ jobs:
   package_acceptance_release_checks:
     name: Run package acceptance
     needs: [resolve_target, prepare_release_package]
-    if: contains(fromJSON('["all","package"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","package"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     permissions:
       actions: read
       contents: read
@@ -495,7 +496,7 @@ jobs:
   qa_lab_parity_lane_release_checks:
     name: Run QA Lab parity lane (${{ matrix.lane }})
     needs: [resolve_target]
-    if: contains(fromJSON('["all","qa","qa-parity"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","qa","qa-parity"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
@@ -579,7 +580,7 @@ jobs:
   qa_lab_parity_report_release_checks:
     name: Run QA Lab parity report
     needs: [resolve_target, qa_lab_parity_lane_release_checks]
-    if: contains(fromJSON('["all","qa","qa-parity"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","qa","qa-parity"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     permissions:
@@ -635,7 +636,7 @@ jobs:
   qa_live_matrix_release_checks:
     name: Run QA Lab live Matrix lane
     needs: [resolve_target]
-    if: contains(fromJSON('["all","qa","qa-live"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","qa","qa-live"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
@@ -712,7 +713,7 @@ jobs:
   qa_live_telegram_release_checks:
     name: Run QA Lab live Telegram lane
     needs: [resolve_target]
-    if: contains(fromJSON('["all","qa","qa-live"]'), needs.resolve_target.outputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","qa","qa-live"]'), needs.resolve_target.outputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
@@ -815,7 +816,7 @@ jobs:
       - qa_lab_parity_report_release_checks
       - qa_live_matrix_release_checks
       - qa_live_telegram_release_checks
-    if: always()
+    if: ${{ (always()) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 5

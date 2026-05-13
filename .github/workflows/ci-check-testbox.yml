@@ -18,6 +18,7 @@ env:
 
 jobs:
   check:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     permissions:
       contents: read
     name: "check"

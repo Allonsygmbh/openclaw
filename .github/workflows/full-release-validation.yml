@@ -96,6 +96,7 @@ env:
 
 jobs:
   resolve_target:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Resolve target ref
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -168,7 +169,7 @@ jobs:
   normal_ci:
     name: Run normal full CI
     needs: [resolve_target]
-    if: contains(fromJSON('["all","ci"]'), inputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","ci"]'), inputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     outputs:
@@ -253,7 +254,7 @@ jobs:
   plugin_prerelease:
     name: Run plugin prerelease validation
     needs: [resolve_target]
-    if: contains(fromJSON('["all","plugin-prerelease"]'), inputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","plugin-prerelease"]'), inputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     outputs:
@@ -338,7 +339,7 @@ jobs:
   release_checks:
     name: Run release/live/Docker/QA validation
     needs: [resolve_target]
-    if: contains(fromJSON('["all","release-checks","install-smoke","cross-os","live-e2e","package","qa","qa-parity","qa-live"]'), inputs.rerun_group)
+    if: ${{ (contains(fromJSON('["all","release-checks","install-smoke","cross-os","live-e2e","package","qa","qa-parity","qa-live"]'), inputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 720
     outputs:
@@ -452,7 +453,7 @@ jobs:
   npm_telegram:
     name: Run post-publish Telegram E2E
     needs: [resolve_target]
-    if: inputs.npm_telegram_package_spec != '' && contains(fromJSON('["all","npm-telegram"]'), inputs.rerun_group)
+    if: ${{ (inputs.npm_telegram_package_spec != '' && contains(fromJSON('["all","npm-telegram"]'), inputs.rerun_group)) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -522,7 +523,7 @@ jobs:
   summary:
     name: Verify full validation
     needs: [normal_ci, plugin_prerelease, release_checks, npm_telegram]
-    if: always()
+    if: ${{ (always()) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

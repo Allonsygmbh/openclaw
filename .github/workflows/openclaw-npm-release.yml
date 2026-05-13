@@ -42,7 +42,7 @@ jobs:
   # openclaw/releases-private/.github/workflows/openclaw-npm-dist-tags.yml
   # so this public workflow can stay focused on OIDC publish only.
   preflight_openclaw_npm:
-    if: ${{ inputs.preflight_only }}
+    if: ${{ (inputs.preflight_only) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -251,7 +251,7 @@ jobs:
           if-no-files-found: error
 
   validate_publish_request:
-    if: ${{ !inputs.preflight_only }}
+    if: ${{ (!inputs.preflight_only) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -280,7 +280,7 @@ jobs:
     # KEEP THE REAL RELEASE/PUBLISH PATH ON A GITHUB-HOSTED RUNNER.
     # npm trusted publishing + provenance requires this to stay on ubuntu-latest.
     needs: [validate_publish_request]
-    if: ${{ !inputs.preflight_only }}
+    if: ${{ (!inputs.preflight_only) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-latest
     environment: npm-release
     permissions:
