@@ -284,26 +284,248 @@ jobs:
           fi
           echo "hardlink audit: 0 hardlinks (good)"
 
-          # End-to-end smoke test: replicate the consumer install path
-          # exactly so we catch ANY ERR_MODULE_NOT_FOUND before publishing.
-          # `openclaw gateway --help` triggers the full runtime import graph
-          # (tslog → interfaces.js → ...), unlike `--version` which only
-          # reads package.json and would silently pass through a broken
-          # bundleDependency.
+          # Import-graph smoke test: replicate the consumer install path
+          # exactly so we catch ANY ERR_MODULE_NOT_FOUND at module load
+          # time before publishing. `openclaw gateway --help` triggers the
+          # full runtime import graph (tslog → interfaces.js → ...),
+          # unlike `--version` which only reads package.json and would
+          # silently pass through a broken bundleDependency.
+          #
+          # NOTE: this only catches LOAD-time errors. Runtime errors that
+          # only surface during `gateway` startup or shutdown (e.g. the
+          # `server-close-*.js` missing-chunk regression that hit
+          # clawy-2026.4.27-11) are caught by the next step.
           mkdir -p _smoke && pushd _smoke >/dev/null
           npm install -g --silent --no-audit --no-fund --ignore-scripts \
             --prefix=./prefix ../openclaw.tgz 2>&1 | tail -3
           OPENCLAW_BIN="$(find prefix -name openclaw -executable -type f | head -1)"
-          if [ -z "$OPENCLAW_BIN" ]; then
+          if [ -z $OPENCLAW_BIN ]; then
             OPENCLAW_BIN="$(find prefix -name openclaw.mjs | head -1)"
-            [ -n "$OPENCLAW_BIN" ] && OPENCLAW_BIN="node $OPENCLAW_BIN"
+            [ -n $OPENCLAW_BIN ] && OPENCLAW_BIN="node $OPENCLAW_BIN"
           fi
-          [ -n "$OPENCLAW_BIN" ] || { echo "ERROR: no openclaw bin in prefix"; exit 1; }
+          [ -n $OPENCLAW_BIN ] || { echo "ERROR: no openclaw bin in prefix"; exit 1; }
+          # Export so the next step's `Start gateway end-to-end` can re-use
+          # the same prefix without reinstalling.
+          echo "OPENCLAW_BIN=$OPENCLAW_BIN" >> "$GITHUB_ENV"
+          echo "OPENCLAW_PREFIX=$PWD/prefix" >> "$GITHUB_ENV"
           echo "openclaw bin: $OPENCLAW_BIN"
           $OPENCLAW_BIN --version
           $OPENCLAW_BIN gateway --help | head -3
           popd >/dev/null
-          rm -rf _verify _smoke
+          # Keep _smoke around — next step uses the installed prefix.
+          rm -rf _verify
+
+      - name: Smoke — required runtime deps present on disk (catches npm-pack drops)
+        # Asserts every entry in the published tarball's `dependencies`
+        # field has files physically present on disk after install. The
+        # clawy-2026.4.27-8 regression slipped past every other check
+        # because `npm pack` silently DROPPED packages it should have
+        # included. The "Bundle all runtime dependencies" step above adds
+        # the channel deps that the runtime requires (grammy + friends)
+        # to `dependencies` specifically so `npm pack`'s filter accepts
+        # them; if it ever silently drops one again, this check catches
+        # it within 30s of install.
+        #
+        # NOTE: we don't check `bundleDependencies` directly — that field
+        # includes 100+ plugin-only deps that live under
+        # dist/extensions/*/node_modules/ via the openclaw plugin loader.
+        # The strict-must-be-on-disk check is for `dependencies` only.
+        run: |
+          set -euo pipefail
+          pushd _smoke >/dev/null
+
+          PKG_JSON="prefix/lib/node_modules/openclaw/package.json"
+          [ -r "$PKG_JSON" ] || { echo "ERROR: $PKG_JSON not readable"; exit 1; }
+          INSTALL_ROOT="$(dirname "$PKG_JSON")"
+
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            import path from 'node:path';
+            const installRoot = '$INSTALL_ROOT';
+            const pkg = JSON.parse(fs.readFileSync(path.join(installRoot, 'package.json'), 'utf8'));
+            const deps = Object.keys(pkg.dependencies || {});
+            console.log('checking', deps.length, 'declared runtime deps for on-disk presence...');
+
+            // Index every node_modules/* anywhere under installRoot.
+            const found = new Map();
+            function walk(dir, depth) {
+              if (depth > 6) return;
+              let entries;
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+              catch { return; }
+              for (const e of entries) {
+                if (!e.isDirectory()) continue;
+                if (e.name === 'node_modules') {
+                  let nmEntries;
+                  try { nmEntries = fs.readdirSync(path.join(dir, e.name), { withFileTypes: true }); }
+                  catch { continue; }
+                  for (const ne of nmEntries) {
+                    if (!ne.isDirectory()) continue;
+                    if (ne.name.startsWith('@')) {
+                      let scopeEntries;
+                      try { scopeEntries = fs.readdirSync(path.join(dir, e.name, ne.name), { withFileTypes: true }); }
+                      catch { continue; }
+                      for (const se of scopeEntries) {
+                        if (!se.isDirectory()) continue;
+                        const full = ne.name + '/' + se.name;
+                        if (!found.has(full)) found.set(full, path.join(dir, e.name, ne.name, se.name));
+                      }
+                    } else {
+                      if (!found.has(ne.name)) found.set(ne.name, path.join(dir, e.name, ne.name));
+                    }
+                  }
+                  walk(path.join(dir, e.name), depth + 1);
+                } else {
+                  walk(path.join(dir, e.name), depth + 1);
+                }
+              }
+            }
+            walk(installRoot, 0);
+
+            const missing = deps.filter(d => !found.has(d));
+            if (missing.length) {
+              console.error('FAIL — ' + missing.length + ' / ' + deps.length + ' declared runtime deps NOT on disk:');
+              for (const m of missing.slice(0, 30)) console.error('  - ' + m);
+              process.exit(1);
+            }
+            console.log('✓ all ' + deps.length + ' declared runtime deps physically present on disk');
+          "
+          popd >/dev/null
+
+      - name: Smoke — start gateway end-to-end (catches runtime + shutdown regressions)
+        # Imports-only smoke (above) catches missing modules at LOAD time.
+        # It does not catch:
+        #   (a) plugin runtime errors that only fire when the plugin
+        #       actually instantiates (e.g. our clawy-2026.4.27-8
+        #       grammy-missing regression — passed --help, failed when
+        #       Telegram started inside `gateway` mode)
+        #   (b) shutdown errors when the runtime tries to import a chunk
+        #       that doesn't exist (e.g. our clawy-2026.4.27-11 missing
+        #       `server-close-*.js` regression — only fires on SIGTERM)
+        #   (c) plugin-entry shape mismatches (e.g. clawychat shipping
+        #       raw `.ts` against an openclaw build that requires
+        #       compiled `dist/index.js`)
+        #
+        # This step actually STARTS the gateway, waits for `ready`, then
+        # cleanly stops it. Each known release-regression bug fits one of
+        # the three failure modes asserted at the bottom of the script.
+        run: |
+          set -euo pipefail
+          pushd _smoke >/dev/null
+
+          # Minimal openclaw.json — no channels configured, just the
+          # default coding agent. Avoids needing Telegram/Slack secrets
+          # in CI. Channel plugin code is still loaded at startup, so
+          # bundled-dep regressions (like missing grammy) still surface.
+          export HOME="$PWD/home"
+          mkdir -p "$HOME/.openclaw"
+          cat > "$HOME/.openclaw/openclaw.json" <<'EOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "bind": "loopback",
+              "port": 13099,
+              "controlUi": {
+                "dangerouslyDisableDeviceAuth": true,
+                "allowedOrigins": ["http://localhost:13099"]
+              },
+              "auth": { "token": "ci-smoke-token" }
+            },
+            "agents": {
+              "defaults": {
+                "model": { "primary": "openai/gpt-image-1" },
+                "thinkingDefault": "off"
+              }
+            },
+            "plugins": { "allow": [] },
+            "channels": {}
+          }
+          EOF
+
+          # Start gateway. Capture stdout+stderr to a log file so we can
+          # assert on it after shutdown. NO_COLOR=1 disables tslog's ANSI
+          # color codes so plain-text grep on log markers works (without
+          # it, `[gateway] ready` ships as `\e[36m[gateway]\e[39m \e[36mready\e[39m`).
+          LOG="$PWD/gateway.log"
+          NO_COLOR=1 $OPENCLAW_BIN gateway > "$LOG" 2>&1 &
+          GW_PID=$!
+
+          # Wait up to 25s for the `gateway ready` marker. The line shape
+          # is "[gateway] ready" in upstream's structured log emitter.
+          ready=0
+          for _ in $(seq 1 50); do
+            if grep -q "\[gateway\] ready" "$LOG"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$GW_PID" 2>/dev/null; then
+              echo "ERROR: gateway exited before reaching ready" >&2
+              cat "$LOG" >&2 || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+
+          if [ "$ready" != "1" ]; then
+            echo "ERROR: gateway did not reach ready within 25s" >&2
+            cat "$LOG" >&2 || true
+            kill -KILL "$GW_PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          # Snapshot a few lines to confirm plugins loaded fine.
+          echo "=== gateway log (ready window) ==="
+          grep -E "(http server listening|\[gateway\] ready|plugins?\])" "$LOG" | head -10 || true
+
+          # Optional health probe — the gateway should be serving HTTP.
+          # /up or / both 200/302; we just want to confirm the socket binds.
+          curl -sS --max-time 5 -o /dev/null -w "  /  -> %{http_code}\n" "http://127.0.0.1:13099/" || true
+
+          # Clean shutdown via SIGTERM. The regression in clawy-2026.4.27-11
+          # fired here — the old process tried to import a chunk that the
+          # upgrade replaced. We assert no `shutdown error` line below.
+          kill -TERM "$GW_PID"
+          for _ in $(seq 1 40); do
+            if ! kill -0 "$GW_PID" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          if kill -0 "$GW_PID" 2>/dev/null; then
+            echo "ERROR: gateway did not exit within 10s of SIGTERM" >&2
+            cat "$LOG" >&2 || true
+            kill -KILL "$GW_PID" 2>/dev/null || true
+            exit 1
+          fi
+          wait "$GW_PID" 2>/dev/null || true
+
+          # ── Hard assertions on the log ────────────────────────────────
+          # Any of these is a release-blocker — better to catch here than
+          # after the tarball is shipped to every VM in the fleet.
+          fail=0
+          if grep -E "ERR_MODULE_NOT_FOUND|Cannot find module" "$LOG"; then
+            echo "ERROR: gateway log contains missing-module error" >&2
+            fail=1
+          fi
+          if grep -E "\[gateway\] shutdown error" "$LOG"; then
+            echo "ERROR: gateway log contains shutdown error (signals chunk-rotation regression)" >&2
+            fail=1
+          fi
+          if grep -E "installed plugin package requires compiled runtime output" "$LOG"; then
+            echo "ERROR: a plugin shipped with the wrong entry shape (TS vs compiled JS)" >&2
+            fail=1
+          fi
+          if grep -E "plugin not found:" "$LOG"; then
+            echo "ERROR: stale plugin config referencing a missing plugin" >&2
+            fail=1
+          fi
+          if [ "$fail" != "0" ]; then
+            echo "=== full gateway log ===" >&2
+            cat "$LOG" >&2
+            exit 1
+          fi
+
+          echo "✓ gateway start+shutdown smoke passed"
+          popd >/dev/null
+          rm -rf _smoke
 
       - name: Verify Clawy patch markers in final tarball
         # Sanity: extract the tarball one more time and confirm both
