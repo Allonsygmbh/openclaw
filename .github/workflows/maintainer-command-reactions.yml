@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   react:
-    if: ${{ !endsWith(github.actor, '[bot]') }}
+    if: ${{ (!endsWith(github.actor, '[bot]')) && github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-24.04
     permissions:
       issues: write

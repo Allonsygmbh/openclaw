@@ -21,6 +21,7 @@ env:
 
 jobs:
   build:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Build live media runner image
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30

@@ -253,6 +253,7 @@ env:
 
 jobs:
   resolve_package:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Resolve package candidate
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
@@ -429,6 +430,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   docker_acceptance:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Docker product acceptance
     needs: resolve_package
     uses: ./.github/workflows/openclaw-live-and-e2e-checks-reusable.yml
@@ -491,7 +493,7 @@ jobs:
   package_telegram:
     name: Telegram package acceptance
     needs: resolve_package
-    if: needs.resolve_package.outputs.telegram_enabled == 'true'
+    if: ${{ (needs.resolve_package.outputs.telegram_enabled == 'true') && github.repository == 'openclaw/openclaw' }}
     uses: ./.github/workflows/npm-telegram-beta-e2e.yml
     with:
       package_spec: ${{ inputs.package_spec }}
@@ -508,7 +510,7 @@ jobs:
   summary:
     name: Verify package acceptance
     needs: [resolve_package, docker_acceptance, package_telegram]
-    if: always()
+    if: ${{ (always()) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:

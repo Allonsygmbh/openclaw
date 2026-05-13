@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   scan:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Scan full repository (precise)
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30

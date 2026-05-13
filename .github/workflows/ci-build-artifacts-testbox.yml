@@ -19,6 +19,7 @@ env:
 
 jobs:
   build-artifacts:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     permissions:
       contents: read
     name: "build-artifacts"

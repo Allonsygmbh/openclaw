@@ -50,6 +50,7 @@ env:
 
 jobs:
   authorize_actor:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Authorize workflow actor
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
@@ -77,6 +78,7 @@ jobs:
             }
 
   validate_selected_ref:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Validate selected ref
     needs: authorize_actor
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -141,6 +143,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   run_mock_parity:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Run QA Lab parity gate
     needs: [validate_selected_ref]
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -214,7 +217,7 @@ jobs:
   run_live_matrix:
     name: Run Matrix live QA lane
     needs: [authorize_actor, validate_selected_ref]
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.matrix_profile == 'all') }}
+    if: ${{ (!(github.event_name == 'workflow_dispatch' && inputs.matrix_profile == 'all')) && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     environment: qa-live-shared
@@ -289,7 +292,7 @@ jobs:
   run_live_matrix_sharded:
     name: Run Matrix live QA lane (${{ matrix.profile }})
     needs: [authorize_actor, validate_selected_ref]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.matrix_profile == 'all' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.matrix_profile == 'all') && github.repository == 'openclaw/openclaw' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
     environment: qa-live-shared
@@ -370,6 +373,7 @@ jobs:
           if-no-files-found: warn
 
   run_live_telegram:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Run Telegram live QA lane with Convex leases
     needs: [authorize_actor, validate_selected_ref]
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -463,6 +467,7 @@ jobs:
           if-no-files-found: warn
 
   run_live_discord:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     name: Run Discord live QA lane with Convex leases
     needs: [authorize_actor, validate_selected_ref]
     runs-on: blacksmith-8vcpu-ubuntu-2404

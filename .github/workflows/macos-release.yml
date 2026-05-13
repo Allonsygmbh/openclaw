@@ -24,6 +24,7 @@ env:
 
 jobs:
   validate_macos_release_request:
+    if: ${{ github.repository == 'openclaw/openclaw' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
