@@ -58,6 +58,7 @@ export {
   getApiErrorPayloadFingerprint,
   isRawApiErrorPayload,
   sanitizeUserFacingText,
+  TRIAL_EXPIRED_USER_MESSAGE,
 } from "./sanitize-user-facing-text.js";
 
 export {
@@ -68,6 +69,7 @@ export {
   isRateLimitErrorMessage,
   isServerErrorMessage,
   isTimeoutErrorMessage,
+  isTrialExpiredErrorMessage,
 } from "./failover-matches.js";
 
 const log = createSubsystemLogger("errors");

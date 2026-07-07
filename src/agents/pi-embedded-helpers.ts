@@ -42,8 +42,10 @@ export {
   isRateLimitErrorMessage,
   isTransientHttpError,
   isTimeoutErrorMessage,
+  isTrialExpiredErrorMessage,
   parseImageDimensionError,
   parseImageSizeError,
+  TRIAL_EXPIRED_USER_MESSAGE,
 } from "./pi-embedded-helpers/errors.js";
 export type { ProviderRuntimeFailureKind } from "./pi-embedded-helpers/errors.js";
 export { sanitizeUserFacingText } from "./pi-embedded-helpers/sanitize-user-facing-text.js";

@@ -35,6 +35,12 @@ export function formatBillingErrorMessage(provider?: string, model?: string): st
 
 export const BILLING_ERROR_USER_MESSAGE = formatBillingErrorMessage();
 
+// Shown when the Clawy trial has lapsed with no active subscription. Kept
+// separate from BILLING_ERROR_USER_MESSAGE, whose "your API key has run out of
+// credits" framing is about bring-your-own-provider keys, not the trial.
+export const TRIAL_EXPIRED_USER_MESSAGE =
+  "⚠️ Your Clawy trial has expired. Subscribe at https://clawy.io/subscribe to resume.";
+
 const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try again later.";
 const MODEL_CAPACITY_ERROR_USER_MESSAGE =
   "⚠️ Selected model is at capacity. Try a different model, or wait and retry.";

@@ -223,6 +223,18 @@ const BILLING_ERROR_HARD_402_RE =
   /["']?(?:status|code)["']?\s*[:=]\s*402\b|\bhttp\s*402\b|\berror(?:\s+code)?\s*[:=]?\s*402\b|^\s*402\s+payment/i;
 const BILLING_ERROR_MAX_LENGTH = 512;
 
+// A lapsed Clawy trial is distinct from provider billing (402 / insufficient
+// credits). The Rails AI proxy returns HTTP 403 with `type: "trial_expired"`
+// and the message "Your trial has expired. Subscribe to resume your clawy.",
+// which none of the billing patterns above match (they key on 402 and on the
+// word "subscription", not "subscribe"). Detect it explicitly so the user gets
+// a subscribe prompt instead of the generic "Something went wrong" fallback.
+const TRIAL_EXPIRED_ERROR_PATTERNS = [
+  /\btrial has expired\b/i,
+  /\btrial[_ ]expired\b/i,
+  /\bsubscribe to resume your clawy\b/i,
+] as const satisfies readonly ErrorPattern[];
+
 function matchesErrorPatterns(raw: string, patterns: readonly ErrorPattern[]): boolean {
   if (!raw) {
     return false;
@@ -279,6 +291,10 @@ export function isBillingErrorMessage(raw: string): boolean {
     value.includes("subscription") ||
     value.includes("plan")
   );
+}
+
+export function isTrialExpiredErrorMessage(raw: string): boolean {
+  return matchesErrorPatterns(raw, TRIAL_EXPIRED_ERROR_PATTERNS);
 }
 
 export function isAuthPermanentErrorMessage(raw: string): boolean {

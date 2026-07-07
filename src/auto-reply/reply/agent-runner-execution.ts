@@ -29,6 +29,8 @@ import {
   isOverloadedErrorMessage,
   isRateLimitErrorMessage,
   isTransientHttpError,
+  isTrialExpiredErrorMessage,
+  TRIAL_EXPIRED_USER_MESSAGE,
 } from "../../agents/pi-embedded-helpers.js";
 import { sanitizeUserFacingText } from "../../agents/pi-embedded-helpers/sanitize-user-facing-text.js";
 import { isLikelyExecutionAckPrompt } from "../../agents/pi-embedded-runner/run/incomplete-turn.js";
@@ -426,6 +428,9 @@ function buildExternalRunFailureReply(
   options?: { includeDetails?: boolean },
 ): ExternalRunFailureReply {
   const normalizedMessage = collapseRepeatedFailureDetail(message);
+  if (isTrialExpiredErrorMessage(normalizedMessage)) {
+    return { text: TRIAL_EXPIRED_USER_MESSAGE, isGenericRunnerFailure: false };
+  }
   if (isToolResultTurnMismatchError(normalizedMessage)) {
     return {
       text: "⚠️ Session history got out of sync. Please try again, or use /new to start a fresh session.",

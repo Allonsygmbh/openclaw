@@ -4,6 +4,7 @@ import {
   isBillingErrorMessage,
   isOverloadedErrorMessage,
   isRateLimitErrorMessage,
+  isTrialExpiredErrorMessage,
 } from "./failover-matches.js";
 
 describe("Z.ai vendor error codes (#48988)", () => {
@@ -69,6 +70,12 @@ describe("Z.ai vendor error codes (#48988)", () => {
       expect(isRateLimitErrorMessage("rate limit exceeded")).toBe(true);
     });
 
+    it("trial-expired still classified correctly", () => {
+      expect(
+        isTrialExpiredErrorMessage("Your trial has expired. Subscribe to resume your clawy."),
+      ).toBe(true);
+    });
+
     it("OpenAI model-capacity text is classified as overloaded", () => {
       expect(
         isOverloadedErrorMessage("Selected model is at capacity. Please try a different model."),
@@ -90,5 +97,50 @@ describe("Z.ai vendor error codes (#48988)", () => {
     it("auth still classified correctly", () => {
       expect(isAuthErrorMessage("invalid api key provided")).toBe(true);
     });
+  });
+});
+
+describe("Clawy trial-expired (403) detection", () => {
+  const BACKEND_MESSAGE = "Your trial has expired. Subscribe to resume your clawy.";
+
+  it("classifies the backend trial-expired message", () => {
+    expect(isTrialExpiredErrorMessage(BACKEND_MESSAGE)).toBe(true);
+  });
+
+  it("classifies the FailoverError-wrapped form seen in gateway logs", () => {
+    expect(
+      isTrialExpiredErrorMessage(`FailoverError: ${BACKEND_MESSAGE}`),
+    ).toBe(true);
+  });
+
+  it("classifies the structured trial_expired error type from the AI proxy", () => {
+    const raw = JSON.stringify({
+      error: {
+        message: BACKEND_MESSAGE,
+        type: "trial_expired",
+        subscribe_url: "https://clawy.io/subscribe",
+      },
+    });
+    expect(isTrialExpiredErrorMessage(raw)).toBe(true);
+  });
+
+  it("does not misclassify a lapsed trial as provider billing (402)", () => {
+    // The whole point: a 403 trial block must not be swallowed by the 402
+    // billing patterns, and vice versa.
+    expect(isBillingErrorMessage(BACKEND_MESSAGE)).toBe(false);
+  });
+
+  it("does not misclassify trial-expired as rate_limit or auth", () => {
+    expect(isRateLimitErrorMessage(BACKEND_MESSAGE)).toBe(false);
+    expect(isAuthErrorMessage(BACKEND_MESSAGE)).toBe(false);
+  });
+
+  it("does not flag unrelated provider-billing text as trial-expired", () => {
+    expect(isTrialExpiredErrorMessage("insufficient credits")).toBe(false);
+    expect(isTrialExpiredErrorMessage("HTTP 402 payment required")).toBe(false);
+  });
+
+  it("returns false for empty input", () => {
+    expect(isTrialExpiredErrorMessage("")).toBe(false);
   });
 });
